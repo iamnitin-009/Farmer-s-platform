@@ -38,7 +38,12 @@ export default function VoiceAssistant({ isOpen, onClose, session }) {
       }
     }
   }, [isOpen])
-
+  // Wake up Render backend when Voice Assistant opens
+useEffect(() => {
+  if (isOpen) {
+    fetch('/api/health').catch(() => {});
+  }
+}, [isOpen])
   // Stop TTS when closing
   const handleClose = () => {
     if (typeof window !== 'undefined' && window.speechSynthesis) {
