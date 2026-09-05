@@ -1,0 +1,752 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SIH 2026 - Farmer Platform Project Analysis & Architecture Plan</title>
+  <style>
+    @page {
+      size: A4;
+      margin: 18mm 16mm 18mm 16mm;
+      @bottom-right {
+        content: counter(page);
+      }
+    }
+
+    :root {
+      --primary: #16321f;
+      --primary-mid: #2f5233;
+      --accent: #4c7a3f;
+      --accent-light: #eaf1e7;
+      --gold: #d9a441;
+      --gold-light: #fef7e6;
+      --bg-paper: #f9f8f4;
+      --card-bg: #ffffff;
+      --text-main: #1d251d;
+      --text-muted: #536250;
+      --border: #e0dcd1;
+      --border-subtle: #eeece4;
+      --danger: #b3261e;
+      --danger-bg: #fdf2f2;
+      --warning: #854d0e;
+      --warning-bg: #fefce8;
+      --success: #15803d;
+      --success-bg: #f0fdf4;
+      --info: #1d4ed8;
+      --info-bg: #eff6ff;
+    }
+
+    * {
+      box-sizing: border-box;
+      -webkit-print-color-adjust: exact !important;
+      print-color-adjust: exact !important;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      color: var(--text-main);
+      background: #ffffff;
+      line-height: 1.5;
+      font-size: 13px;
+      margin: 0;
+      padding: 0;
+    }
+
+    /* Header & Branding */
+    .report-header {
+      background: linear-gradient(135deg, var(--primary) 0%, var(--primary-mid) 100%);
+      color: #ffffff;
+      padding: 24px 28px;
+      border-radius: 10px;
+      margin-bottom: 24px;
+      border-left: 6px solid var(--gold);
+    }
+
+    .report-badge {
+      display: inline-block;
+      background: rgba(217, 164, 65, 0.25);
+      color: #fce7b0;
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      padding: 4px 10px;
+      border-radius: 4px;
+      margin-bottom: 8px;
+      border: 1px solid rgba(217, 164, 65, 0.4);
+    }
+
+    .report-title {
+      font-size: 22px;
+      font-weight: 800;
+      margin: 0 0 6px 0;
+      letter-spacing: -0.2px;
+      color: #ffffff;
+    }
+
+    .report-subtitle {
+      font-size: 13px;
+      color: #d1e2cf;
+      margin: 0 0 14px 0;
+      line-height: 1.4;
+    }
+
+    .metadata-bar {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+      background: rgba(0, 0, 0, 0.2);
+      padding: 10px 14px;
+      border-radius: 6px;
+      font-size: 11px;
+    }
+
+    .meta-item strong {
+      display: block;
+      color: var(--gold);
+      font-size: 9.5px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 2px;
+    }
+
+    /* Section Layout */
+    .section {
+      margin-bottom: 24px;
+      page-break-inside: avoid;
+    }
+
+    h2 {
+      font-size: 16px;
+      font-weight: 700;
+      color: var(--primary);
+      margin: 20px 0 10px 0;
+      padding-bottom: 6px;
+      border-bottom: 2px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    h2 .num {
+      background: var(--primary);
+      color: #ffffff;
+      font-size: 11px;
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: bold;
+    }
+
+    h3 {
+      font-size: 13.5px;
+      font-weight: 700;
+      color: var(--primary-mid);
+      margin: 14px 0 6px 0;
+    }
+
+    p {
+      margin: 0 0 8px 0;
+      color: var(--text-main);
+    }
+
+    /* Alert / Callout Boxes */
+    .callout {
+      padding: 10px 14px;
+      border-radius: 6px;
+      margin: 12px 0;
+      font-size: 12px;
+      border-left: 4px solid;
+    }
+
+    .callout-warning {
+      background: var(--warning-bg);
+      border-color: var(--gold);
+      color: #713f12;
+    }
+
+    .callout-danger {
+      background: var(--danger-bg);
+      border-color: var(--danger);
+      color: #7f1d1d;
+    }
+
+    .callout-success {
+      background: var(--success-bg);
+      border-color: var(--success);
+      color: #14532d;
+    }
+
+    .callout-info {
+      background: var(--info-bg);
+      border-color: var(--info);
+      color: #1e3a8a;
+    }
+
+    /* Tables */
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 12px 0 16px 0;
+      font-size: 11.5px;
+      page-break-inside: avoid;
+    }
+
+    th {
+      background: #f1ede2;
+      color: var(--primary);
+      font-weight: 700;
+      text-align: left;
+      padding: 8px 10px;
+      border: 1px solid var(--border);
+    }
+
+    td {
+      padding: 7px 10px;
+      border: 1px solid var(--border);
+      vertical-align: top;
+    }
+
+    tr:nth-child(even) td {
+      background: #faf8f3;
+    }
+
+    /* Badges */
+    .badge {
+      display: inline-block;
+      padding: 2px 7px;
+      border-radius: 4px;
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+    }
+
+    .badge-success { background: #dcfce7; color: #15803d; }
+    .badge-warning { background: #fef3c7; color: #b45309; }
+    .badge-danger { background: #fee2e2; color: #b91c1c; }
+    .badge-info { background: #e0e7ff; color: #3730a3; }
+    .badge-gray { background: #f3f4f6; color: #4b5563; }
+
+    /* Code Blocks / Tree */
+    .code-tree {
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+      border-radius: 6px;
+      padding: 12px 16px;
+      font-family: "Cascadia Code", "Courier New", monospace;
+      font-size: 11px;
+      line-height: 1.45;
+      color: #1e293b;
+      margin: 10px 0 16px 0;
+      white-space: pre;
+    }
+
+    /* Grid layout */
+    .two-col {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+      margin: 12px 0;
+      page-break-inside: avoid;
+    }
+
+    .card {
+      background: #ffffff;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px 14px;
+    }
+
+    .card h4 {
+      margin: 0 0 6px 0;
+      font-size: 12.5px;
+      color: var(--primary);
+    }
+
+    /* Timeline / Phases */
+    .phase-block {
+      border-left: 3px solid var(--accent);
+      padding-left: 14px;
+      margin-bottom: 14px;
+      page-break-inside: avoid;
+    }
+
+    .phase-title {
+      font-weight: 700;
+      font-size: 12.5px;
+      color: var(--primary);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 4px;
+    }
+
+    .phase-desc {
+      color: var(--text-muted);
+      font-size: 11.5px;
+      margin: 0 0 4px 0;
+    }
+
+    .phase-tasks {
+      margin: 4px 0 0 0;
+      padding-left: 18px;
+      font-size: 11.5px;
+      color: var(--text-main);
+    }
+
+    .phase-tasks li {
+      margin-bottom: 3px;
+    }
+
+    /* Diagram */
+    .arch-diagram {
+      background: #fdfdfc;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px;
+      margin: 14px 0;
+      page-break-inside: avoid;
+    }
+
+    .layer-row {
+      display: grid;
+      grid-template-columns: 140px 1fr;
+      gap: 12px;
+      margin-bottom: 8px;
+      align-items: center;
+    }
+
+    .layer-title {
+      font-weight: 700;
+      font-size: 11px;
+      text-transform: uppercase;
+      color: var(--primary);
+      background: #edf3ec;
+      padding: 8px 10px;
+      border-radius: 4px;
+      text-align: center;
+      border: 1px solid #d5e5d3;
+    }
+
+    .layer-items {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .layer-box {
+      background: #ffffff;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 6px 10px;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-main);
+      box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+      flex: 1;
+      min-width: 110px;
+      text-align: center;
+    }
+
+    .layer-box small {
+      display: block;
+      font-weight: normal;
+      color: var(--text-muted);
+      font-size: 9.5px;
+      margin-top: 2px;
+    }
+
+    .footer-note {
+      text-align: center;
+      font-size: 10px;
+      color: var(--text-muted);
+      margin-top: 30px;
+      border-top: 1px solid var(--border);
+      padding-top: 12px;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Header Banner -->
+  <div class="report-header">
+    <div class="report-badge">Smart India Hackathon (SIH) 2026</div>
+    <h1 class="report-title">Farmer-to-Buyer Marketplace & Supply-Chain Platform</h1>
+    <div class="report-subtitle">
+      Comprehensive Codebase Diagnostic, Maturity Audit, Risk Evaluation, and Target Architecture Roadmap
+    </div>
+    <div class="metadata-bar">
+      <div class="meta-item">
+        <strong>Problem Statement</strong>
+        Direct Agrimarket & Logistics
+      </div>
+      <div class="meta-item">
+        <strong>Active Stack</strong>
+        React 19.2.8 + Vite 8.2.2
+      </div>
+      <div class="meta-item">
+        <strong>Current Maturity</strong>
+        Landing Page & UI Shell (Phase 0)
+      </div>
+      <div class="meta-item">
+        <strong>Target Execution</strong>
+        AI-Enabled MVP (Phases 1-6)
+      </div>
+    </div>
+  </div>
+
+  <!-- Section 1: Executive Summary -->
+  <div class="section">
+    <h2><span class="num">1</span> Executive Summary</h2>
+    <p>
+      The goal of this SIH 2026 initiative is to build a transparent, AI-driven agricultural ecosystem that eliminates intermediary exploitation, maximizes farmer price realization, reduces end-consumer grocery bills, and streamlines farm-to-hub pickup and aggregated logistics.
+    </p>
+    <p>
+      A thorough, non-destructive audit of the existing repository confirms that the codebase currently functions as an <strong>aesthetic, bilingual informational landing page</strong> with custom responsive CSS tokens and modal triggers. However, <strong>none of the functional backend, database, transaction, AI grading, or route optimization workflows are implemented yet</strong>. 
+    </p>
+    <div class="callout callout-info">
+      <strong>Core Assessment:</strong> The codebase is in a clean baseline state with an elegant design foundation and zero dependency bloat. With intentional architectural structuring (adding client routing, a dedicated AI backend service, and spatial database persistence), it is primed for rapid MVP development.
+    </div>
+  </div>
+
+  <!-- Section 2: Repository Structure & File Inventory -->
+  <div class="section">
+    <h2><span class="num">2</span> Repository Structure & File Inventory</h2>
+    <p>The workspace contains 19 source assets under <code>src/</code>, 2 public files, and standard Vite config:</p>
+
+    <div class="code-tree">farmer-s-platform/
+├── package.json              # React 19.2.8, Vite 8.2.2, Oxlint
+├── vite.config.js            # Standard @vitejs/plugin-react
+├── index.html                # Single page root shell
+├── public/                   # favicon.svg (Vite), icons.svg (unused)
+└── src/
+    ├── main.jsx              # React.StrictMode mount with index.css
+    ├── App.jsx               # Coordinator: LanguageProvider + HomePage
+    ├── index.css             # Core design system tokens & responsive layout
+    ├── App.css               # ⚠️ Orphaned Vite template CSS (185 lines, unimported)
+    ├── translations.js       # Complete bilingual dictionary (English / Hindi)
+    ├── context/
+    │   └── LanguageContext.jsx # React context providing { lang, toggleLang, t }
+    ├── components/
+    │   ├── Header.jsx        # Sticky navigation, brand, voice CTA, lang switch
+    │   ├── Hero.jsx          # Value proposition, farmer/buyer CTAs, custom SVG
+    │   ├── HowItWorks.jsx    # 7-step sequential workflow visualization
+    │   ├── Icons.jsx         # 10 hand-crafted vector SVG icon components
+    │   ├── Modal.jsx         # Reusable backdrop dialog with event stopPropagation
+    │   ├── UserTypes.jsx     # Persona dual-card selector (Farmer vs Buyer)
+    │   └── Footer.jsx        # SIH project attribution
+    └── assets/               # hero.png, react.svg, vite.svg (all unreferenced)</div>
+
+    <table>
+      <thead>
+        <tr>
+          <th>File / Component</th>
+          <th>Lines / Size</th>
+          <th>Architectural Responsibility</th>
+          <th>Audit Finding</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>src/context/LanguageContext.jsx</code></td>
+          <td>43 lines</td>
+          <td>Global language state & dictionary provider</td>
+          <td><span class="badge badge-warning">Fast Refresh Warning</span> Exports hook & component together</td>
+        </tr>
+        <tr>
+          <td><code>src/translations.js</code></td>
+          <td>169 lines</td>
+          <td>Static bilingual string mappings (EN / HI)</td>
+          <td><span class="badge badge-success">Clean Structure</span> Outlines all 7 vision steps clearly</td>
+        </tr>
+        <tr>
+          <td><code>src/components/Modal.jsx</code></td>
+          <td>24 lines</td>
+          <td>Accessible popup dialog with click-outside dismiss</td>
+          <td><span class="badge badge-success">Reusable</span> Clean accessible modal implementation</td>
+        </tr>
+        <tr>
+          <td><code>src/components/Icons.jsx</code></td>
+          <td>101 lines</td>
+          <td>Zero-dependency lightweight SVG React icons</td>
+          <td><span class="badge badge-success">Optimized</span> Keeps bundle footprint minimal (no heavy icon library)</td>
+        </tr>
+        <tr>
+          <td><code>src/App.css</code></td>
+          <td>185 lines</td>
+          <td>Original Vite starter stylesheet</td>
+          <td><span class="badge badge-danger">Dead Code</span> Not imported anywhere in the project</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Section 3: Feature Maturity Audit -->
+  <div class="section">
+    <h2><span class="num">3</span> Feature Maturity Audit: Implemented vs. Placeholders</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Feature Component</th>
+          <th>Current State</th>
+          <th>Maturity</th>
+          <th>What Is Needed For MVP</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>Bilingual Switching (EN / HI)</strong></td>
+          <td>Instant reactive translation toggle across all labels and modals</td>
+          <td><span class="badge badge-success">Working</span></td>
+          <td>Extend to dynamic backend data (crop names, notifications)</td>
+        </tr>
+        <tr>
+          <td><strong>Visual 7-Step Supply Flow</strong></td>
+          <td>Numbered, interconnected responsive workflow cards with icons</td>
+          <td><span class="badge badge-success">Working</span></td>
+          <td>Link each step card to the corresponding interactive portal</td>
+        </tr>
+        <tr>
+          <td><strong>Farmer Listing & Onboarding</strong></td>
+          <td>Clicking "I'm a Farmer" triggers an informational popup modal</td>
+          <td><span class="badge badge-warning">Placeholder</span></td>
+          <td>Produce upload form: crop, variety, quantity, harvest date, GPS</td>
+        </tr>
+        <tr>
+          <td><strong>Buyer Marketplace & Orders</strong></td>
+          <td>Clicking "I'm a Buyer" triggers an informational popup modal</td>
+          <td><span class="badge badge-warning">Placeholder</span></td>
+          <td>Product catalog, grade filtering, cart, order placement & escrow</td>
+        </tr>
+        <tr>
+          <td><strong>AI Crop Quality Grading</strong></td>
+          <td>Referenced in Step 2 of HowItWorks text</td>
+          <td><span class="badge badge-danger">Missing</span></td>
+          <td>Camera capture + Gemini Vision multimodal quality score (A/B/C)</td>
+        </tr>
+        <tr>
+          <td><strong>AI Fair Price Recommendation</strong></td>
+          <td>Referenced in Step 3 of HowItWorks text</td>
+          <td><span class="badge badge-danger">Missing</span></td>
+          <td>Mandi APMC live benchmark + quality grade multiplier formula</td>
+        </tr>
+        <tr>
+          <td><strong>Smart Hub Aggregation</strong></td>
+          <td>Referenced in Steps 5 & 6 of HowItWorks text</td>
+          <td><span class="badge badge-danger">Missing</span></td>
+          <td>Geographic clustering of farm coordinates to optimal pickup centers</td>
+        </tr>
+        <tr>
+          <td><strong>Logistics & Route Optimization</strong></td>
+          <td>Referenced in Step 7 of HowItWorks text</td>
+          <td><span class="badge badge-danger">Missing</span></td>
+          <td>Map visualization + Multi-stop TSP/VRP route planner (Leaflet)</td>
+        </tr>
+        <tr>
+          <td><strong>Voice Assistant</strong></td>
+          <td>Header microphone button shows "Coming soon" modal</td>
+          <td><span class="badge badge-warning">Placeholder</span></td>
+          <td>Web Speech API speech-to-text parser for Hindi and English voice input</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Section 4: Architecture, Dependencies & State Analysis -->
+  <div class="section">
+    <h2><span class="num">4</span> Architectural & Dependency Diagnostics</h2>
+    
+    <div class="two-col">
+      <div class="card">
+        <h4>Runtime & Build System</h4>
+        <p><strong>React 19.2.8:</strong> Takes advantage of the latest React engine and high performance JSX runtime.</p>
+        <p><strong>Vite 8.2.2:</strong> Ultra-fast hot module replacement, 282ms production build time, and Oxlint static analysis.</p>
+        <p><strong>Styling:</strong> Pure CSS design tokens in <code>index.css</code>. No CSS-in-JS overhead; highly performant on low-end smartphones.</p>
+      </div>
+
+      <div class="card">
+        <h4>State & Data Management</h4>
+        <p><strong>Global State:</strong> Restricted to <code>LanguageContext</code>. No authentication state, user session, or cart storage currently exists.</p>
+        <p><strong>Component State:</strong> Local state in <code>HomePage</code> controls modal visibility and selected user persona.</p>
+        <p><strong>Network Layer:</strong> Zero HTTP client installed (no Axios or TanStack Query). All data is hardcoded in client memory.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Section 5: Technical Issues, Risks & Breaking Points -->
+  <div class="section">
+    <h2><span class="num">5</span> Technical Debt & Pre-Integration Risks</h2>
+    
+    <div class="callout callout-danger">
+      <strong>Risk 1: Missing Git Version Control:</strong> The directory is not initialized as a git repository (<code>fatal: not a git repository</code>). Any destructive code modifications or refactoring cannot be rolled back without git tracking.
+    </div>
+
+    <div class="callout callout-warning">
+      <strong>Risk 2: Oxlint Fast Refresh Penalty:</strong> In <code>LanguageContext.jsx</code>, exporting both <code>LanguageProvider</code> and <code>useLanguage()</code> causes Oxlint warning: <code>warning react(only-export-components)</code>. In Vite, this triggers full browser reloads during development instead of seamless hot module state preservation.
+    </div>
+
+    <div class="callout callout-warning">
+      <strong>Risk 3: Single-Page Architecture Lock:</strong> Currently, all views are jammed into <code>App.jsx</code> with modal overlays. Attempting to add multi-step farmer forms, image capture, catalog browsing, and maps within modals will result in fragile, unmaintainable spaghetti code. A dedicated routing system (<code>react-router-dom</code>) is mandatory.
+    </div>
+
+    <div class="callout callout-info">
+      <strong>Risk 4: React 19 Peer Dependency Compatibility:</strong> When installing ecosystem packages (e.g. mapping libraries, chart libraries, or specialized UI widgets), certain npm packages may strictly enforce React 18 in their <code>peerDependencies</code>. Packages must be selected for React 19 compatibility or installed with appropriate peer resolution.
+    </div>
+
+    <div class="callout callout-info">
+      <strong>Risk 5: AI Workload Placement (Client vs. Server):</strong> Running computer vision models directly in rural client mobile browsers causes device crashes and exposes private API keys. AI processing (Gemini Vision / price models) must reside in a secure backend microservice.
+    </div>
+  </div>
+
+  <!-- Section 6: Recommended MVP System Architecture -->
+  <div class="section">
+    <h2><span class="num">6</span> Recommended Target Architecture for MVP</h2>
+    <p>A modular, scalable architecture separating client presentation, REST orchestration, AI inference, and geospatial persistence:</p>
+
+    <div class="arch-diagram">
+      <div class="layer-row">
+        <div class="layer-title">Client Layer</div>
+        <div class="layer-items">
+          <div class="layer-box">React 19 + Vite<small>Mobile-First UI</small></div>
+          <div class="layer-box">React Router<small>/farmer, /buyer, /hub</small></div>
+          <div class="layer-box">Web Speech API<small>Hindi / English Voice</small></div>
+          <div class="layer-box">Leaflet / OpenStreetMap<small>Interactive Route Maps</small></div>
+        </div>
+      </div>
+
+      <div class="layer-row">
+        <div class="layer-title">API & Backend</div>
+        <div class="layer-items">
+          <div class="layer-box">FastAPI / Node.js<small>High Performance REST</small></div>
+          <div class="layer-box">Auth Service<small>Farmer Mobile / OTP</small></div>
+          <div class="layer-box">Order & Listing Engine<small>Produce Lifecycle</small></div>
+          <div class="layer-box">Mandi Price Scraper<small>Agmarknet Benchmarks</small></div>
+        </div>
+      </div>
+
+      <div class="layer-row">
+        <div class="layer-title">AI & Optimization</div>
+        <div class="layer-items">
+          <div class="layer-box" style="border-color: var(--accent);">Gemini Vision AI<small>Quality Grading (A/B/C)</small></div>
+          <div class="layer-box" style="border-color: var(--accent);">Fair Price Corridor<small>Quality-Adjusted Multiplier</small></div>
+          <div class="layer-box" style="border-color: var(--gold);">Hub Clustering<small>Spatial K-Means / DBSCAN</small></div>
+          <div class="layer-box" style="border-color: var(--gold);">Route Optimizer<small>TSP / Vehicle Routing Engine</small></div>
+        </div>
+      </div>
+
+      <div class="layer-row">
+        <div class="layer-title">Persistence Layer</div>
+        <div class="layer-items">
+          <div class="layer-box">PostgreSQL + PostGIS<small>Geospatial Farmer & Hub Data</small></div>
+          <div class="layer-box">Cloud Object Storage<small>Produce Quality Photos</small></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Section 7: Prioritized Implementation Plan -->
+  <div class="section">
+    <h2><span class="num">7</span> Prioritized Implementation Plan (SIH Execution Roadmap)</h2>
+
+    <div class="phase-block">
+      <div class="phase-title">
+        <span class="badge badge-info">Phase 0</span>
+        Foundation, Git Initialization & Cleanup
+      </div>
+      <div class="phase-desc">Stabilize workspace, resolve lint warnings, and set up source control.</div>
+      <ul class="phase-tasks">
+        <li>Initialize Git repository (<code>git init</code>), create initial commit, and establish feature branching.</li>
+        <li>Split <code>LanguageContext.jsx</code> (separate <code>useLanguage</code> hook file) to eliminate Oxlint fast-refresh warning.</li>
+        <li>Prune dead starter files (<code>src/App.css</code>, unreferenced starter SVGs).</li>
+      </ul>
+    </div>
+
+    <div class="phase-block">
+      <div class="phase-title">
+        <span class="badge badge-info">Phase 1</span>
+        Client Routing & Role-Based Portals
+      </div>
+      <div class="phase-desc">Transition from a static single page into a full multi-view application.</div>
+      <ul class="phase-tasks">
+        <li>Install and configure <code>react-router-dom</code> with clean layout wrappers.</li>
+        <li>Create routes: <code>/</code> (Landing Page), <code>/farmer</code> (Farmer Portal), <code>/buyer</code> (Buyer Marketplace), <code>/logistics</code> (Hub & Route Visualizer).</li>
+        <li>Wire Hero and User Type CTA buttons to route directly to respective portals.</li>
+      </ul>
+    </div>
+
+    <div class="phase-block">
+      <div class="phase-title">
+        <span class="badge badge-info">Phase 2</span>
+        Farmer Produce Listing & AI Quality Grading
+      </div>
+      <div class="phase-desc">Allow farmers to photograph crops and receive an instant automated quality score.</div>
+      <ul class="phase-tasks">
+        <li>Build mobile-friendly crop listing form (crop type, quantity, harvest timestamp, GPS coordinates).</li>
+        <li>Add camera/photo upload handler with image preview and compression.</li>
+        <li>Integrate Gemini Multimodal API endpoint to analyze produce defects, color, and size uniformity; output transparent <strong>Grade A, B, or C</strong> rating.</li>
+      </ul>
+    </div>
+
+    <div class="phase-block">
+      <div class="phase-title">
+        <span class="badge badge-info">Phase 3</span>
+        AI Fair Price Recommendation Engine
+      </div>
+      <div class="phase-desc">Provide price transparency that eliminates middleman price gouging.</div>
+      <ul class="phase-tasks">
+        <li>Establish APMC Mandi market price benchmark integration.</li>
+        <li>Apply AI quality grade multipliers (+15% Grade A premium, base Grade B, -10% Grade C).</li>
+        <li>Display interactive price corridor (e.g., Recommended ₹28 - ₹32/kg vs. traditional middleman payout of ₹18/kg).</li>
+      </ul>
+    </div>
+
+    <div class="phase-block">
+      <div class="phase-title">
+        <span class="badge badge-info">Phase 4</span>
+        Buyer Marketplace & Direct Matchmaking
+      </div>
+      <div class="phase-desc">Enable commercial and retail buyers to source directly from farmers.</div>
+      <ul class="phase-tasks">
+        <li>Build searchable marketplace catalog with filters for crop category, quality grade, distance, and quantity.</li>
+        <li>Implement buyer bulk demand posting interface.</li>
+        <li>Build transparent order checkout and direct farmer contact flow.</li>
+      </ul>
+    </div>
+
+    <div class="phase-block">
+      <div class="phase-title">
+        <span class="badge badge-info">Phase 5</span>
+        Smart Hub Aggregation & Logistics Route Optimizer
+      </div>
+      <div class="phase-desc">Solve the rural logistics bottleneck with batching and optimal transit paths.</div>
+      <ul class="phase-tasks">
+        <li>Implement spatial clustering to group nearby farmer listings into designated collection hubs.</li>
+        <li>Embed interactive Leaflet / OpenStreetMap visualizer displaying collection hubs, farm pickups, and buyer destinations.</li>
+        <li>Solve Multi-Stop Vehicle Routing Problem (VRP) to display the optimal, fuel-efficient delivery trajectory.</li>
+      </ul>
+    </div>
+
+    <div class="phase-block">
+      <div class="phase-title">
+        <span class="badge badge-info">Phase 6</span>
+        Multilingual Voice Assistant & Hackathon Polish
+      </div>
+      <div class="phase-desc">Empower non-tech-savvy farmers with voice-driven operations.</div>
+      <ul class="phase-tasks">
+        <li>Integrate Web Speech API (<code>SpeechRecognition</code>) supporting Hindi and English speech inputs.</li>
+        <li>Parse spoken queries (e.g., <em>"मुझे 25 क्विंटल गेहूं बेचना है"</em>) directly into auto-populated listing inputs.</li>
+        <li>Conduct end-to-end rehearsal with mock rural network bandwidth simulation.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="footer-note">
+    Smart India Hackathon (SIH) 2026 • AI-Powered Farmer Marketplace & Logistics Optimization • System Diagnostic Report
+  </div>
+
+</body>
+</html>
