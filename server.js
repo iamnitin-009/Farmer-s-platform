@@ -4,8 +4,12 @@
 import express from 'express';
 import dotenv from 'dotenv';
 import { GoogleGenAI } from '@google/genai';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
 dotenv.config();
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 5001;
@@ -388,7 +392,12 @@ export { app, calculateDeterministicGrade };
 export default app;
 
 if (process.env.NODE_ENV !== 'test') {
-  app.listen(PORT, () => {
+  app.use(express.static(path.join(__dirname, 'dist')));
+
+app.get(/.*/, (req, res) => {
+  res.sendFile(path.join(__dirname, 'dist', 'index.html'));
+});
+  app.listen(PORT, '0.0.0.0', () => {
     console.log(`[Server] Produce Quality Check API listening on http://localhost:${PORT}`);
     console.log(`[Server] Provider: Google Gemini | Model: ${GEMINI_MODEL_ID}`);
   });
