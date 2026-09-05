@@ -345,7 +345,7 @@ CRITICAL RULES:
       contents,
       config: {
         temperature: 0.3,
-        maxOutputTokens: 200,
+        maxOutputTokens: 600,
       },
     });
 
