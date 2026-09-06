@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useLanguage } from '../context/LanguageContext.jsx'
 import { registerUser, loginUser } from '../utils/auth.js'
-import { IconLeaf } from '../components/Icons.jsx'
+import PragatiLogo, { PragatiSymbol } from '../components/PragatiLogo.jsx'
 
 export default function AuthPage({ onNavigate, onAuthSuccess, initialMode = 'login' }) {
   const { t } = useLanguage()
@@ -41,11 +41,12 @@ export default function AuthPage({ onNavigate, onAuthSuccess, initialMode = 'log
   // Validate Login Form
   const validateLogin = () => {
     const newErrors = {}
+    const trimmed = mobile.trim()
     const cleanedMobile = cleanMobileNumber(mobile)
 
-    if (!mobile.trim()) {
+    if (!trimmed) {
       newErrors.mobile = authT.validation.mobileRequired
-    } else if (!isValidIndianMobile(cleanedMobile)) {
+    } else if (trimmed.toLowerCase() !== 'admin' && !isValidIndianMobile(cleanedMobile)) {
       newErrors.mobile = authT.validation.mobileInvalid
     }
 
@@ -101,15 +102,19 @@ export default function AuthPage({ onNavigate, onAuthSuccess, initialMode = 'log
 
     setIsSubmitting(true)
     try {
+      const trimmed = mobile.trim()
+      const loginIdentifier = trimmed.toLowerCase() === 'admin' ? 'admin' : cleanMobileNumber(mobile)
       const res = await loginUser({
-        mobile: cleanMobileNumber(mobile),
+        mobile: loginIdentifier,
         password,
       })
 
       if (res.success) {
         onAuthSuccess(res.user)
       } else {
-        if (res.error === 'invalid_credentials') {
+        if (res.error === 'account_suspended') {
+          setGeneralError('This account has been suspended by the platform administrator.')
+        } else if (res.error === 'invalid_credentials') {
           setGeneralError(authT.validation.invalidCredentials)
         } else {
           setGeneralError(authT.validation.invalidCredentials)
@@ -172,11 +177,24 @@ export default function AuthPage({ onNavigate, onAuthSuccess, initialMode = 'log
       </div>
 
       <div className="section-inner auth-container">
+        {/* Prominent PRAGATI Brand Logo & Wordmark above Auth Form */}
+        <div
+          className="auth-brand-banner"
+          onClick={() => onNavigate('/')}
+          role="button"
+          tabIndex={0}
+          onKeyDown={(e) => (e.key === 'Enter' || e.key === ' ') && onNavigate('/')}
+          style={{ cursor: 'pointer', textAlign: 'center', marginBottom: '22px' }}
+          title={t.farmerPortal?.backToHome || 'Home'}
+        >
+          <PragatiLogo size="lg" variant="dark" showTagline={true} taglineText={t.header?.tagline} />
+        </div>
+
         <div className="auth-card">
           {/* Card Header with Icon and Title */}
           <div className="auth-header">
-            <div className="auth-icon-wrap">
-              <IconLeaf />
+            <div className="auth-icon-wrap pragati-auth-icon-wrap">
+              <PragatiSymbol size={40} />
             </div>
             <h1>{mode === 'login' ? authT.loginHeading : authT.registerHeading}</h1>
             <p className="auth-subheading">

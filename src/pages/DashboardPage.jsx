@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useLanguage } from '../context/LanguageContext.jsx'
 import { getUserListings, getUserOrders, getFarmerOrders, getOrderEscrowStats } from '../utils/auth.js'
 import { IconSprout, IconBasket, IconPin } from '../components/Icons.jsx'
@@ -60,6 +60,30 @@ export default function DashboardPage({ session, onNavigate, onLogout }) {
   // Deterministic top 3 demanded crops forecast
   const topDemandedCrops = getTopDemandedCrops(3, { lang })
 
+  // Active role state
+  const [currentRole, setCurrentRole] = useState(session?.role || 'farmer')
+
+  // Automatically redirect admin to /admin
+  useEffect(() => {
+    if (session?.role === 'admin') {
+      onNavigate('/admin')
+    }
+  }, [session, onNavigate])
+
+  const handleRoleToggle = (targetRole) => {
+    setCurrentRole(targetRole)
+    if (typeof window !== 'undefined') {
+      try {
+        const raw = localStorage.getItem('sih_user_session')
+        if (raw) {
+          const sess = JSON.parse(raw)
+          sess.role = targetRole
+          localStorage.setItem('sih_user_session', JSON.stringify(sess))
+        }
+      } catch {}
+    }
+  }
+
   return (
     <div className="dashboard-page">
       {/* Top Header / Profile Info */}
@@ -79,11 +103,33 @@ export default function DashboardPage({ session, onNavigate, onLogout }) {
                   {session?.location || 'India'}
                 </span>
                 <span className="meta-badge-mobile">📱 {session?.mobile}</span>
+                <span className="meta-badge-role">
+                  {currentRole === 'buyer' ? '🛒 Buyer Account' : '🧑‍🌾 Farmer Account'}
+                </span>
               </div>
             </div>
           </div>
 
           <div className="dashboard-top-actions">
+            <div className="role-mode-switch" role="group" aria-label="Role Switcher">
+              <button
+                type="button"
+                className={`btn-role-mode ${currentRole === 'farmer' ? 'is-active' : ''}`}
+                onClick={() => handleRoleToggle('farmer')}
+                title="Switch to Farmer View"
+              >
+                🧑‍🌾 Farmer View
+              </button>
+              <button
+                type="button"
+                className={`btn-role-mode ${currentRole === 'buyer' ? 'is-active' : ''}`}
+                onClick={() => handleRoleToggle('buyer')}
+                title="Switch to Buyer View"
+              >
+                🛒 Buyer View
+              </button>
+            </div>
+
             <button
               type="button"
               className="btn btn-outline btn-logout-dash"

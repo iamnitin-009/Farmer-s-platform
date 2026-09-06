@@ -6,6 +6,7 @@ import dotenv from 'dotenv';
 import { GoogleGenAI } from '@google/genai';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { listingStore } from './server/listingStore.js';
 
 dotenv.config();
 const __filename = fileURLToPath(import.meta.url);
@@ -35,10 +36,239 @@ function calculateDeterministicGrade(score) {
 app.get('/api/health', (req, res) => {
   res.json({
     status: 'ok',
-    service: 'AI Produce Quality Check',
+    service: 'AI Produce Quality Check & Shared Marketplace',
     provider: 'Google Gemini',
     model: GEMINI_MODEL_ID,
+    storage: listingStore.isPostgres ? 'PostgreSQL' : 'Local File-Synced Fallback',
   });
+});
+
+// -------------------------------------------------------------
+// Shared Persistent Marketplace Listings API
+// -------------------------------------------------------------
+
+function getReqUser(req) {
+  const headerRole = req.headers['x-user-role'];
+  const queryRole = req.query.role;
+  const headerId = req.headers['x-user-id'];
+  const queryId = req.query.userId;
+  const bodyId = req.body?.farmerId;
+
+  const id = headerId || queryId || bodyId || null;
+  let role = (headerRole || queryRole || (id === 'admin' ? 'admin' : 'buyer')).toLowerCase();
+
+  return {
+    id,
+    role,
+    name: req.headers['x-user-name'] || req.body?.farmerName || 'User',
+    mobile: req.headers['x-user-mobile'] || req.body?.farmerMobile || '',
+  };
+}
+
+// 1. GET /api/listings - Retrieve listings
+app.get('/api/listings', async (req, res) => {
+  try {
+    const user = getReqUser(req);
+    const { crop, status, farmerId } = req.query;
+
+    const listings = await listingStore.getAllListings({
+      role: user.role,
+      farmerId: farmerId || (user.role === 'farmer' && req.query.myListings === 'true' ? user.id : undefined),
+      crop,
+      status,
+    });
+
+    res.json({
+      success: true,
+      count: listings.length,
+      listings,
+    });
+  } catch (err) {
+    console.error('[Error] GET /api/listings failure:', err);
+    res.status(500).json({ success: false, error: 'Failed to retrieve listings' });
+  }
+});
+
+// 2. GET /api/listings/:id - Retrieve single listing
+app.get('/api/listings/:id', async (req, res) => {
+  try {
+    const listing = await listingStore.getListingById(req.params.id);
+    if (!listing) {
+      return res.status(404).json({ success: false, error: 'Listing not found' });
+    }
+    res.json({ success: true, listing });
+  } catch (err) {
+    console.error('[Error] GET /api/listings/:id failure:', err);
+    res.status(500).json({ success: false, error: 'Failed to retrieve listing' });
+  }
+});
+
+// 3. POST /api/listings - Create listing
+app.post('/api/listings', async (req, res) => {
+  try {
+    const user = getReqUser(req);
+
+    // Authorization: buyers cannot create produce listings
+    if (user.role === 'buyer') {
+      return res.status(403).json({
+        success: false,
+        error: 'Buyers cannot create produce listings. Please switch to a Farmer account.',
+      });
+    }
+
+    const {
+      crop,
+      quantity,
+      price,
+      location,
+      harvestDate,
+      photo,
+      quality,
+      fairPrice,
+      pickupDecision,
+      traceabilityId,
+      id,
+    } = req.body;
+
+    if (!crop || !SUPPORTED_CROPS.includes(crop.toLowerCase())) {
+      return res.status(400).json({
+        success: false,
+        error: `Invalid or missing crop. Must be one of: ${SUPPORTED_CROPS.join(', ')}`,
+      });
+    }
+
+    const numQty = parseFloat(quantity);
+    if (!quantity || isNaN(numQty) || numQty <= 0) {
+      return res.status(400).json({ success: false, error: 'Quantity must be a positive number' });
+    }
+
+    const numPrice = parseFloat(price);
+    if (!price || isNaN(numPrice) || numPrice <= 0) {
+      return res.status(400).json({ success: false, error: 'Price must be a positive number' });
+    }
+
+    if (!location || !String(location).trim()) {
+      return res.status(400).json({ success: false, error: 'Location is required' });
+    }
+
+    const newListing = await listingStore.createListing({
+      id,
+      farmerId: user.id || req.body.farmerId || 'demo_farmer',
+      farmerName: user.name || req.body.farmerName || 'Farmer',
+      farmerMobile: user.mobile || req.body.farmerMobile || '',
+      crop: crop.toLowerCase(),
+      quantity: numQty,
+      price: numPrice,
+      location: String(location).trim(),
+      harvestDate: harvestDate || new Date().toISOString().split('T')[0],
+      photo: photo || null,
+      quality: quality || null,
+      fairPrice: fairPrice || null,
+      pickupDecision: pickupDecision || null,
+      traceabilityId: traceabilityId || null,
+      status: 'Listed',
+      moderationStatus: 'approved',
+    });
+
+    res.status(201).json({
+      success: true,
+      listing: newListing,
+    });
+  } catch (err) {
+    console.error('[Error] POST /api/listings failure:', err);
+    res.status(500).json({ success: false, error: 'Failed to create listing' });
+  }
+});
+
+// 4. PUT /api/listings/:id - Edit listing or update status/inventory
+app.put('/api/listings/:id', async (req, res) => {
+  try {
+    const user = getReqUser(req);
+    const existing = await listingStore.getListingById(req.params.id);
+
+    if (!existing) {
+      return res.status(404).json({ success: false, error: 'Listing not found' });
+    }
+
+    // Authorization:
+    const isAdmin = user.role === 'admin' || user.id === 'admin';
+    const isOwner = (user.id && existing.farmerId === user.id) ||
+                    (user.mobile && existing.farmerMobile === user.mobile);
+    const isBuyerOrderDecrement = Boolean(
+      req.body.decrementQuantity || req.body.action === 'order_decrement'
+    );
+
+    if (!isAdmin && !isOwner && !isBuyerOrderDecrement) {
+      return res.status(403).json({
+        success: false,
+        error: 'Unauthorized: You do not have permission to modify this listing.',
+      });
+    }
+
+    let updates = { ...req.body };
+
+    // Handle buyer order inventory decrement
+    if (isBuyerOrderDecrement) {
+      const decAmount = parseFloat(req.body.decrementQuantity || req.body.quantity || 0);
+      const remaining = Math.max(0, existing.quantity - decAmount);
+      updates = {
+        quantity: remaining,
+        status: remaining === 0 ? 'Sold Out' : existing.status,
+      };
+    }
+
+    // Prevent non-admin farmers from tampering with moderationStatus or ownership
+    if (!isAdmin) {
+      delete updates.moderationStatus;
+      delete updates.farmerId;
+      delete updates.farmerMobile;
+    }
+
+    const updated = await listingStore.updateListing(req.params.id, updates);
+    res.json({ success: true, listing: updated });
+  } catch (err) {
+    console.error('[Error] PUT /api/listings/:id failure:', err);
+    res.status(500).json({ success: false, error: 'Failed to update listing' });
+  }
+});
+
+// 5. DELETE /api/listings/:id - Delete listing
+app.delete('/api/listings/:id', async (req, res) => {
+  try {
+    const user = getReqUser(req);
+    const existing = await listingStore.getListingById(req.params.id);
+
+    if (!existing) {
+      return res.status(404).json({ success: false, error: 'Listing not found' });
+    }
+
+    const isAdmin = user.role === 'admin' || user.id === 'admin';
+    const isOwner = (user.id && existing.farmerId === user.id) ||
+                    (user.mobile && existing.farmerMobile === user.mobile);
+
+    if (!isAdmin && !isOwner) {
+      return res.status(403).json({
+        success: false,
+        error: 'Unauthorized: You can only delete your own listings.',
+      });
+    }
+
+    await listingStore.deleteListing(req.params.id);
+    res.json({ success: true, message: 'Listing deleted successfully' });
+  } catch (err) {
+    console.error('[Error] DELETE /api/listings/:id failure:', err);
+    res.status(500).json({ success: false, error: 'Failed to delete listing' });
+  }
+});
+
+// Reset endpoint for testing suites
+app.post('/api/listings/reset', async (req, res) => {
+  try {
+    await listingStore.resetSeedData();
+    res.json({ success: true, message: 'Listings reset to default seed data' });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 // Quality check endpoint

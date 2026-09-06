@@ -11,6 +11,7 @@ import { getFarmerOrders, advanceOrderStatus } from '../utils/auth.js'
 import { getStepIndex } from '../utils/paymentEscrow.js'
 import { ensureListingTraceabilityId, generateQrDataUrl, getTraceabilityUrl } from '../utils/traceability.js'
 import { predictCropDemand, getDemandBadgeStyle } from '../utils/demandPrediction.js'
+import { fetchListings, createListing as apiCreateListing, deleteListing as apiDeleteListing } from '../utils/listingService.js'
 
 const STORAGE_KEY = 'sih_farmer_listings'
 
@@ -223,11 +224,27 @@ export default function FarmerPortal({ onNavigate, session, onLogout }) {
   // Synchronize listings to localStorage on change
   useEffect(() => {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(listings))
+      const unique = Array.from(new Map(listings.map((item) => [item.id, item])).values())
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(unique))
     } catch (err) {
       console.error('Error saving listings to localStorage:', err)
     }
   }, [listings])
+
+  // Fetch fresh shared listings from backend upon mounting
+  useEffect(() => {
+    let isMounted = true
+    fetchListings({ role: 'farmer' }, session)
+      .then((serverListings) => {
+        if (isMounted && Array.isArray(serverListings) && serverListings.length > 0) {
+          setListings(serverListings)
+        }
+      })
+      .catch(() => {})
+    return () => {
+      isMounted = false
+    }
+  }, [session])
 
   // Handle image upload with live preview
   const handlePhotoChange = (e) => {
@@ -416,8 +433,11 @@ export default function FarmerPortal({ onNavigate, session, onLogout }) {
     // Ensure stable unique traceability ID for this listing
     ensureListingTraceabilityId(newListing)
 
-    // Update state (triggers useEffect to save into localStorage)
-    setListings((prev) => [newListing, ...prev])
+    // Save to shared backend & update state
+    apiCreateListing(newListing, session).catch((err) => {
+      console.warn('Backend createListing notice:', err)
+    })
+    setListings((prev) => [newListing, ...prev.filter((l) => l.id !== newListing.id)])
     setRecentListing(newListing)
 
     // Reset form fields
@@ -451,6 +471,9 @@ export default function FarmerPortal({ onNavigate, session, onLogout }) {
   const handleDeleteListing = (id) => {
     if (window.confirm(portalT.confirmDelete)) {
       setListings((prev) => prev.filter((item) => item.id !== id))
+      apiDeleteListing(id, session).catch((err) => {
+        console.warn('Backend deleteListing notice:', err)
+      })
     }
   }
 

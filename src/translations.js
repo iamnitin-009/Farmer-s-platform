@@ -6,7 +6,7 @@
 const translations = {
   en: {
     header: {
-      title: 'Agri Marketplace',
+      title: 'PRAGATI',
       tagline: 'Farmers & Buyers, connected directly',
       voiceAssistant: 'Voice Assistant',
       loginCta: 'Login / Get Started',
@@ -74,7 +74,7 @@ const translations = {
       close: 'Close',
     },
     footer: {
-      text: 'A student project for Smart India Hackathon — connecting farms to markets.',
+      text: '© 2026 PRAGATI. All rights reserved. Connecting farms directly to markets.',
     },
     farmerPortal: {
       title: 'Farmer Produce Portal',
@@ -238,7 +238,7 @@ const translations = {
       registerTab: 'Create Account',
       loginHeading: 'Welcome Back',
       loginSubheading: 'Enter your registered mobile number and password to access your platform dashboard.',
-      registerHeading: 'Join Agri Marketplace',
+      registerHeading: 'Join PRAGATI',
       registerSubheading: 'Create an account to sell your harvest, buy fresh produce, and track your agricultural trades.',
       demoNotice: 'SIH 2026 Prototype: Local account and session simulation without requiring SMS OTP.',
       nameLabel: 'Full Name',
@@ -645,7 +645,7 @@ const translations = {
 
   hi: {
     header: {
-      title: 'कृषि बाज़ार',
+      title: 'PRAGATI',
       tagline: 'किसान और खरीदार, सीधे जुड़े हुए',
       voiceAssistant: 'वॉइस असिस्टेंट',
       loginCta: 'लॉग इन / शुरू करें',
@@ -713,7 +713,7 @@ const translations = {
       close: 'बंद करें',
     },
     footer: {
-      text: 'Smart India Hackathon के लिए एक छात्र परियोजना — खेतों को बाज़ारों से जोड़ना।',
+      text: '© 2026 PRAGATI. सर्वाधिकार सुरक्षित। खेतों को बाज़ारों से जोड़ना।',
     },
     farmerPortal: {
       title: 'किसान उपज पोर्टल',
@@ -877,7 +877,7 @@ const translations = {
       registerTab: 'नया खाता बनाएं',
       loginHeading: 'वापसी पर स्वागत है',
       loginSubheading: 'अपने डैशबोर्ड तक पहुंचने के लिए अपना पंजीकृत मोबाइल नंबर और पासवर्ड दर्ज करें।',
-      registerHeading: 'कृषि बाज़ार से जुड़ें',
+      registerHeading: 'PRAGATI से जुड़ें',
       registerSubheading: 'अपनी उपज बेचने, ताज़ी फसल खरीदने और अपने कृषि व्यापार को प्रबंधित करने के लिए खाता बनाएं।',
       demoNotice: 'SIH 2026 प्रोटोटाइप सूचना: एसएमएस ओटीपी के बिना डेमो के लिए स्थानीय खाता व सत्र।',
       nameLabel: 'पूरा नाम',

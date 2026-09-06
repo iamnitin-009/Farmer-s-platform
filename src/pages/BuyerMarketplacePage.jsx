@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useEffect } from 'react'
 import { useLanguage } from '../context/LanguageContext.jsx'
 import {
   getUserOrders,
@@ -13,6 +13,7 @@ import { getGradeBadgeStyle } from '../utils/quality.js'
 import { isEligibleForHubListing, getAggregatedCropTotal } from '../utils/aggregation.js'
 import { ensureListingTraceabilityId, generateQrDataUrl, getTraceabilityUrl } from '../utils/traceability.js'
 import { predictCropDemand, getDemandBadgeStyle } from '../utils/demandPrediction.js'
+import { fetchListings, updateListing as apiUpdateListing } from '../utils/listingService.js'
 
 const CROP_KEYS = ['wheat', 'rice', 'potato', 'onion', 'tomato', 'fruits']
 
@@ -98,8 +99,30 @@ export default function BuyerMarketplacePage({ onNavigate, session }) {
     }
   })
 
-  // Refresh listings from localStorage
-  const refreshListings = () => {
+  // Fetch shared listings from backend upon mount and when session updates
+  useEffect(() => {
+    let isMounted = true
+    fetchListings({ role: 'buyer' }, session)
+      .then((serverItems) => {
+        if (isMounted && Array.isArray(serverItems) && serverItems.length > 0) {
+          setListings(serverItems)
+        }
+      })
+      .catch(() => {})
+    return () => {
+      isMounted = false
+    }
+  }, [session])
+
+  // Refresh listings from backend with local fallback
+  const refreshListings = async () => {
+    try {
+      const serverItems = await fetchListings({ role: 'buyer' }, session)
+      if (Array.isArray(serverItems)) {
+        setListings(serverItems)
+        return
+      }
+    } catch {}
     try {
       const raw = localStorage.getItem('sih_farmer_listings')
       setListings(raw ? JSON.parse(raw) : [])
@@ -250,6 +273,8 @@ export default function BuyerMarketplacePage({ onNavigate, session }) {
     setIsPlacingOrder(false)
 
     if (result.success) {
+      const rem = Math.max(0, orderingListing.quantity - qty)
+      apiUpdateListing(orderingListing.id, { quantity: rem, action: 'order_decrement' }, session).catch(() => {})
       setOrderSuccess(result.order)
       setOrderingListing(null)
       if (session?.id) {

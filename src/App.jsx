@@ -7,6 +7,7 @@ import PlatformFeatures from './components/PlatformFeatures.jsx'
 import FarmerPortal from './components/FarmerPortal.jsx'
 import AuthPage from './pages/AuthPage.jsx'
 import DashboardPage from './pages/DashboardPage.jsx'
+import AdminDashboardPage from './pages/AdminDashboardPage.jsx'
 import BuyerMarketplacePage from './pages/BuyerMarketplacePage.jsx'
 import HubAggregationPage from './pages/HubAggregationPage.jsx'
 import LogisticsRoutePage from './pages/LogisticsRoutePage.jsx'
@@ -15,7 +16,7 @@ import VoiceAssistant from './components/VoiceAssistant.jsx'
 import Footer from './components/Footer.jsx'
 import { getCurrentUser, logoutUser } from './utils/auth.js'
 
-// App.jsx coordinates top-level routing between '/', '/auth', '/dashboard', '/farmer', '/buyer', and '/traceability'
+// App.jsx coordinates top-level routing between '/', '/auth', '/dashboard', '/farmer', '/buyer', '/admin', and '/traceability'
 // wrapped in LanguageProvider so language state is shared globally.
 export default function App() {
   const [currentPath, setCurrentPath] = useState(window.location.pathname)
@@ -47,12 +48,16 @@ function MainApp({ currentPath, onNavigate }) {
 
   const handleAuthSuccess = (newSession) => {
     setSession(newSession)
-    onNavigate('/dashboard')
+    if (newSession?.role === 'admin') {
+      onNavigate('/admin')
+    } else {
+      onNavigate('/dashboard')
+    }
   }
 
-  // Enforce session protection on navigation
+  // Enforce session protection & role authorization on navigation
   useEffect(() => {
-    // Unauthenticated access to protected routes -> redirect to /auth
+    // 1. Unauthenticated access to protected routes -> redirect to /auth
     if (!session) {
       if (
         currentPath === '/dashboard' ||
@@ -60,14 +65,24 @@ function MainApp({ currentPath, onNavigate }) {
         currentPath === '/buyer' ||
         currentPath === '/hub' ||
         currentPath === '/logistics' ||
+        currentPath === '/admin' ||
         currentPath === '/farmer-auth'
       ) {
         onNavigate('/auth')
       }
-    }
-    // Already authenticated visitor navigating to auth pages -> redirect to /dashboard
-    else if (currentPath === '/auth' || currentPath === '/farmer-auth') {
-      onNavigate('/dashboard')
+    } else {
+      // 2. Already authenticated visitor navigating to auth pages -> redirect to appropriate dashboard
+      if (currentPath === '/auth' || currentPath === '/farmer-auth') {
+        if (session.role === 'admin') {
+          onNavigate('/admin')
+        } else {
+          onNavigate('/dashboard')
+        }
+      }
+      // 3. Non-admin trying to access /admin -> redirect to user /dashboard
+      else if (currentPath === '/admin' && session.role !== 'admin') {
+        onNavigate('/dashboard')
+      }
     }
   }, [currentPath, session, onNavigate])
 
@@ -82,6 +97,7 @@ function MainApp({ currentPath, onNavigate }) {
 
   const closeModal = () => setOpenModal(null)
 
+  const isAdmin = currentPath === '/admin'
   const isDashboard = currentPath === '/dashboard'
   const isAuth = currentPath === '/auth' || currentPath === '/farmer-auth'
   const isFarmerPortal = currentPath === '/farmer'
@@ -110,6 +126,19 @@ function MainApp({ currentPath, onNavigate }) {
             onNavigate={onNavigate}
             session={session}
           />
+        ) : isAdmin ? (
+          session?.role === 'admin' ? (
+            <AdminDashboardPage
+              session={session}
+              onNavigate={onNavigate}
+              onLogout={handleLogout}
+            />
+          ) : (
+            <AuthPage
+              onNavigate={onNavigate}
+              onAuthSuccess={handleAuthSuccess}
+            />
+          )
         ) : isDashboard ? (
           session ? (
             <DashboardPage

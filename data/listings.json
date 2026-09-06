@@ -1,0 +1,166 @@
+[
+  {
+    "id": "seed_listing_wheat_01",
+    "farmerId": "farmer_ramesh_01",
+    "farmerName": "Ramesh Kumar",
+    "farmerMobile": "9876599001",
+    "crop": "wheat",
+    "quantity": 120,
+    "price": 26,
+    "location": "Nashik, Maharashtra",
+    "harvestDate": "2026-03-01",
+    "photo": null,
+    "quality": {
+      "score": 92,
+      "grade": "A",
+      "confidence": 0.95,
+      "observations": [
+        "Clean golden grain",
+        "Low moisture content",
+        "Premium texture"
+      ],
+      "assessedAt": "2026-09-06T06:22:35.395Z",
+      "model": "gemini-3.7-flash"
+    },
+    "fairPrice": {
+      "suggestedPrice": 26,
+      "minPrice": 23,
+      "maxPrice": 28,
+      "grade": "A",
+      "basePrice": 24
+    },
+    "pickupDecision": {
+      "method": "HOME",
+      "thresholdKg": 100,
+      "quantityKg": 120,
+      "reason": "Volume (120 kg) exceeds 100 kg threshold for wheat. Direct home pickup scheduled."
+    },
+    "status": "Listed",
+    "moderationStatus": "approved",
+    "traceabilityId": "TRC-WHEAT-NASHIK-9876",
+    "createdAt": "2026-09-04T06:22:35.396Z"
+  },
+  {
+    "id": "seed_listing_tomato_02",
+    "farmerId": "farmer_suresh_02",
+    "farmerName": "Suresh Patil",
+    "farmerMobile": "9822334455",
+    "crop": "tomato",
+    "quantity": 45,
+    "price": 32,
+    "location": "Pune, Maharashtra",
+    "harvestDate": "2026-03-04",
+    "photo": null,
+    "quality": {
+      "score": 88,
+      "grade": "B",
+      "confidence": 0.91,
+      "observations": [
+        "Firm texture",
+        "Vibrant red color",
+        "Minor blemishes"
+      ],
+      "assessedAt": "2026-09-06T06:22:35.396Z",
+      "model": "gemini-3.7-flash"
+    },
+    "fairPrice": {
+      "suggestedPrice": 32,
+      "minPrice": 28,
+      "maxPrice": 36,
+      "grade": "B",
+      "basePrice": 30
+    },
+    "pickupDecision": {
+      "method": "HOME",
+      "thresholdKg": 30,
+      "quantityKg": 45,
+      "reason": "Volume (45 kg) exceeds 30 kg threshold for tomato. Direct farm pickup scheduled."
+    },
+    "status": "Listed",
+    "moderationStatus": "approved",
+    "traceabilityId": "TRC-TOMATO-PUNE-2233",
+    "createdAt": "2026-09-05T06:22:35.396Z"
+  },
+  {
+    "id": "seed_listing_onion_03",
+    "farmerId": "farmer_vijay_03",
+    "farmerName": "Vijay Deshmukh",
+    "farmerMobile": "9890112233",
+    "crop": "onion",
+    "quantity": 50,
+    "price": 28,
+    "location": "Lasalgaon, Maharashtra",
+    "harvestDate": "2026-03-02",
+    "photo": null,
+    "quality": {
+      "score": 95,
+      "grade": "A",
+      "confidence": 0.96,
+      "observations": [
+        "Uniform size",
+        "Dry outer skin",
+        "High keeping quality"
+      ],
+      "assessedAt": "2026-09-06T06:22:35.396Z",
+      "model": "gemini-3.7-flash"
+    },
+    "fairPrice": {
+      "suggestedPrice": 28,
+      "minPrice": 25,
+      "maxPrice": 31,
+      "grade": "A",
+      "basePrice": 26
+    },
+    "pickupDecision": {
+      "method": "HUB",
+      "thresholdKg": 75,
+      "quantityKg": 50,
+      "reason": "Volume (50 kg) is below 75 kg threshold for onion. Hub drop-off required."
+    },
+    "status": "Listed",
+    "moderationStatus": "approved",
+    "traceabilityId": "TRC-ONION-LASAL-9011",
+    "createdAt": "2026-09-05T18:22:35.396Z"
+  },
+  {
+    "id": "seed_listing_potato_04",
+    "farmerId": "farmer_anita_04",
+    "farmerName": "Anita Sharma",
+    "farmerMobile": "9711223344",
+    "crop": "potato",
+    "quantity": 110,
+    "price": 19,
+    "location": "Indore, Madhya Pradesh",
+    "harvestDate": "2026-03-03",
+    "photo": null,
+    "quality": {
+      "score": 91,
+      "grade": "A",
+      "confidence": 0.94,
+      "observations": [
+        "Clean oval tubers",
+        "Free of greening",
+        "Excellent size"
+      ],
+      "assessedAt": "2026-09-06T06:22:35.396Z",
+      "model": "gemini-3.7-flash"
+    },
+    "fairPrice": {
+      "suggestedPrice": 19,
+      "minPrice": 16,
+      "maxPrice": 22,
+      "grade": "A",
+      "basePrice": 18
+    },
+    "pickupDecision": {
+      "method": "HOME",
+      "thresholdKg": 75,
+      "quantityKg": 110,
+      "reason": "Volume (110 kg) exceeds 75 kg threshold for potato. Direct pickup scheduled."
+    },
+    "status": "Listed",
+    "moderationStatus": "approved",
+    "traceabilityId": "TRC-POTATO-INDORE-1122",
+    "createdAt": "2026-09-06T00:22:35.396Z"
+  }
+]
