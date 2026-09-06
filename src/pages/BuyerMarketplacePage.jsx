@@ -275,6 +275,11 @@ export default function BuyerMarketplacePage({ onNavigate, session }) {
     if (result.success) {
       const rem = Math.max(0, orderingListing.quantity - qty)
       apiUpdateListing(orderingListing.id, { quantity: rem, action: 'order_decrement' }, session).catch(() => {})
+      fetch('/api/orders', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(result.order),
+      }).catch(() => {})
       setOrderSuccess(result.order)
       setOrderingListing(null)
       if (session?.id) {
@@ -637,7 +642,7 @@ export default function BuyerMarketplacePage({ onNavigate, session }) {
                                       : (dpT.lowDemand || 'Low Demand')}
                                 </span>
                                 {demandPred.predictedDemandKg > 0 && (
-                                  <span className="demand-qty-sub"> ({demandPred.predictedDemandKg} kg)</span>
+                                  <span className="demand-qty-sub"> ({demandPred.predictedDemand || demandPred.predictedDemandKg} kg/7d)</span>
                                 )}
                               </div>
                             )

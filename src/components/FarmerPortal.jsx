@@ -10,7 +10,7 @@ import { isEligibleForHubListing } from '../utils/aggregation.js'
 import { getFarmerOrders, advanceOrderStatus } from '../utils/auth.js'
 import { getStepIndex } from '../utils/paymentEscrow.js'
 import { ensureListingTraceabilityId, generateQrDataUrl, getTraceabilityUrl } from '../utils/traceability.js'
-import { predictCropDemand, getDemandBadgeStyle } from '../utils/demandPrediction.js'
+import { predictCropDemand, fetchDemandPrediction, getDemandBadgeStyle } from '../utils/demandPrediction.js'
 import { fetchListings, createListing as apiCreateListing, deleteListing as apiDeleteListing } from '../utils/listingService.js'
 
 const STORAGE_KEY = 'sih_farmer_listings'
@@ -198,10 +198,24 @@ export default function FarmerPortal({ onNavigate, session, onLogout }) {
     ? getPickupDecision(crop, quantity, lang)
     : null
 
-  // Deterministic AI Demand Prediction calculation based on marketplace order trends
-  const demandPrediction = crop
-    ? predictCropDemand({ crop, lang })
-    : null
+  // 7-Day Demand Forecast calculation with live backend sync & reliable local fallback
+  const [liveDemandPrediction, setLiveDemandPrediction] = useState(null)
+
+  useEffect(() => {
+    if (!crop) {
+      setLiveDemandPrediction(null)
+      return
+    }
+    let isCurrent = true
+    fetchDemandPrediction({ crop, lang }).then((pred) => {
+      if (isCurrent && pred) {
+        setLiveDemandPrediction(pred)
+      }
+    }).catch(() => {})
+    return () => { isCurrent = false }
+  }, [crop, lang])
+
+  const demandPrediction = liveDemandPrediction || (crop ? predictCropDemand({ crop, lang }) : null)
 
   const handleApplyFairPrice = () => {
     if (fairPriceResult?.suggestedPrice) {
@@ -875,7 +889,7 @@ export default function FarmerPortal({ onNavigate, session, onLogout }) {
                   </div>
 
 
-                  {/* AI Demand Prediction Card */}
+                  {/* 7-Day Demand Forecast Card */}
                   <div className="form-group full-width">
                     {demandPrediction && demandPrediction.cropKey !== 'unknown' ? (
                       <div className="demand-prediction-card">
@@ -883,9 +897,9 @@ export default function FarmerPortal({ onNavigate, session, onLogout }) {
                           <div className="demand-title-row">
                             <span className="demand-icon">📈</span>
                             <div>
-                              <div className="demand-heading-text">{dpT.title || 'AI Demand Prediction'}</div>
+                              <div className="demand-heading-text">{dpT.title || '7-Day Demand Forecast'}</div>
                               <div className="demand-crop-subtitle">
-                                {portalT.crops?.[demandPrediction.cropKey] || demandPrediction.crop}
+                                {portalT.crops?.[demandPrediction.cropKey] || demandPrediction.crop} • {dpT.horizonLabel || 'Next 7 Days'}
                               </div>
                             </div>
                           </div>
@@ -908,11 +922,9 @@ export default function FarmerPortal({ onNavigate, session, onLogout }) {
                         <div className="demand-card-body">
                           <div className="demand-stats-row">
                             <div className="demand-stat-box">
-                              <span className="d-stat-label">{dpT.predictedDemand || 'Predicted Demand'}</span>
+                              <span className="d-stat-label">{dpT.predictedDemand || 'Predicted Demand (7 Days)'}</span>
                               <span className="d-stat-val">
-                                {demandPrediction.predictedDemandKg > 0
-                                  ? `${demandPrediction.predictedDemandKg} kg`
-                                  : (dpT.notEnoughData || 'Not enough data')}
+                                {demandPrediction.predictedDemand || demandPrediction.predictedDemandKg} kg
                               </span>
                             </div>
                             <div className="demand-stat-box">
@@ -927,6 +939,12 @@ export default function FarmerPortal({ onNavigate, session, onLogout }) {
                             </div>
                           </div>
 
+                          {demandPrediction.dataSource === 'baseline_estimate' && (
+                            <div className="demand-baseline-notice" style={{ fontSize: '0.8rem', color: '#64748b', backgroundColor: '#f8fafc', padding: '4px 10px', borderRadius: '6px', border: '1px solid #e2e8f0', marginTop: '6px' }}>
+                              ℹ️ {dpT.baselineNotice || 'Baseline estimate — limited platform order history'}
+                            </div>
+                          )}
+
                           <div className="demand-explanation-box">
                             <p className="demand-explanation-text">{demandPrediction.explanation}</p>
                             <p className="demand-rec-text">
@@ -938,7 +956,7 @@ export default function FarmerPortal({ onNavigate, session, onLogout }) {
                     ) : (
                       <div className="demand-prompt-box">
                         <span>📈</span>
-                        <span>{dpT.selectCropPrompt || 'Select a crop above to see AI demand prediction'}</span>
+                        <span>{dpT.selectCropPrompt || 'Select a crop above to see 7-day demand forecast'}</span>
                       </div>
                     )}
                   </div>

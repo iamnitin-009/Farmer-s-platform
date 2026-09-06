@@ -11,7 +11,7 @@ import {
   advanceOrderStatus,
 } from '../utils/auth.js'
 import { getAllHubAggregations } from '../utils/aggregation.js'
-import { getTopDemandedCrops, getDemandBadgeStyle } from '../utils/demandPrediction.js'
+import { getTopDemandedCrops, getDemandBadgeStyle, fetchDemandPrediction } from '../utils/demandPrediction.js'
 import { getGradeBadgeStyle } from '../utils/quality.js'
 import { IconShield } from '../components/Icons.jsx'
 import { PragatiSymbol } from '../components/PragatiLogo.jsx'
@@ -90,10 +90,21 @@ export default function AdminDashboardPage({ onNavigate, onLogout }) {
     return getAllHubAggregations(listings)
   }, [listings])
 
-  // Top Demanded Crops
-  const topDemands = useMemo(() => {
-    return getTopDemandedCrops(6, { lang })
+  // Top Demanded Crops with live backend synchronization
+  const [apiDemands, setApiDemands] = useState(null)
+  useEffect(() => {
+    fetchDemandPrediction({ lang })
+      .then((data) => {
+        if (data?.predictions && Array.isArray(data.predictions)) {
+          setApiDemands(data.predictions)
+        }
+      })
+      .catch(() => {})
   }, [lang])
+
+  const topDemands = useMemo(() => {
+    return apiDemands || getTopDemandedCrops(6, { lang })
+  }, [apiDemands, lang])
 
   // Filtered Users
   const filteredUsers = useMemo(() => {
@@ -843,25 +854,27 @@ export default function AdminDashboardPage({ onNavigate, onLogout }) {
 
             <div className="admin-card mt-4">
               <div className="admin-card-header">
-                <h3>Crop Demand Forecast Engine (Next 7-14 Days)</h3>
+                <h3>7-Day Crop Demand Forecast Engine</h3>
               </div>
               <div className="admin-table-wrap">
                 <table className="admin-table">
                   <thead>
                     <tr>
                       <th>Crop</th>
-                      <th>Demand Trend</th>
-                      <th>Forecast Score</th>
+                      <th>Demand Level</th>
+                      <th>Predicted (7 Days)</th>
+                      <th>Confidence</th>
                       <th>Market Outlook</th>
                       <th>Suggested Farmer Action</th>
                     </tr>
                   </thead>
                   <tbody>
                     {topDemands.map((item) => {
-                      const badge = getDemandBadgeStyle(item.level)
+                      const badge = getDemandBadgeStyle(item.demandLevel)
+                      const predVol = item.predictedDemand || item.predictedDemandKg || 0
                       return (
-                        <tr key={item.crop}>
-                          <td><strong>{item.cropName || item.crop}</strong></td>
+                        <tr key={item.cropKey || item.crop}>
+                          <td><strong>{item.crop}</strong></td>
                           <td>
                             <span
                               style={{
@@ -873,12 +886,20 @@ export default function AdminDashboardPage({ onNavigate, onLogout }) {
                                 fontWeight: 'bold',
                               }}
                             >
-                              {item.levelLabel || item.level}
+                              {badge.labelEn || item.demandLevel}
                             </span>
                           </td>
-                          <td><strong>{item.score}/100</strong></td>
-                          <td>{item.trendExplanation}</td>
-                          <td>{item.actionRecommendation}</td>
+                          <td><strong>{predVol.toLocaleString()} kg</strong></td>
+                          <td><strong>{item.confidence}%</strong></td>
+                          <td>
+                            {item.explanation}
+                            {item.dataSource === 'baseline_estimate' && (
+                              <span style={{ display: 'block', fontSize: '0.75rem', color: '#64748b' }}>
+                                (Baseline estimate)
+                              </span>
+                            )}
+                          </td>
+                          <td>{item.recommendation}</td>
                         </tr>
                       )
                     })}

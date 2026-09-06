@@ -1,1 +1,33 @@
-[]
+[
+  {
+    "id": "listing_1788697105686_ntv1j",
+    "farmerId": "user_1788697103726_zpwp",
+    "farmerName": "Amit Verma",
+    "farmerMobile": "9876500001",
+    "crop": "potato",
+    "quantity": 50,
+    "price": 20,
+    "location": "Karnal, Haryana",
+    "harvestDate": "2026-09-25",
+    "photo": null,
+    "quality": null,
+    "fairPrice": {
+      "suggestedPrice": 17,
+      "minPrice": 16,
+      "maxPrice": 18,
+      "grade": null,
+      "basePrice": 18
+    },
+    "pickupDecision": {
+      "method": "HOME",
+      "thresholdKg": 75,
+      "quantityKg": 600,
+      "reason": "Quantity (600 kg) exceeds the hub pickup threshold (75 kg), so direct farmgate pickup is recommended."
+    },
+    "status": "Listed",
+    "moderationStatus": "approved",
+    "traceabilityId": "TRC-2026-6NTV1J",
+    "createdAt": "2026-09-06T12:18:25.696Z",
+    "updatedAt": "2026-09-06T12:18:28.610Z"
+  }
+]

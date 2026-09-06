@@ -8,6 +8,13 @@ import Groq from 'groq-sdk';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { listingStore } from './server/listingStore.js';
+import {
+  calculate7DayDemand,
+  calculateAllCropsDemand,
+  getTopDemandedCropsList,
+  normalizeCropKey,
+  CROP_7DAY_BASELINE_DEMAND,
+} from './server/demandPredictor.js';
 
 dotenv.config();
 const __filename = fileURLToPath(import.meta.url);
@@ -278,6 +285,128 @@ app.post('/api/listings/reset', async (req, res) => {
   }
 });
 
+// -------------------------------------------------------------
+// Demand Prediction API (7-Day Horizon, Velocity & Baselines)
+// -------------------------------------------------------------
+app.get('/api/demand-prediction', async (req, res) => {
+  try {
+    const { crop, lang = 'en' } = req.query;
+
+    if (crop) {
+      const normalized = normalizeCropKey(crop);
+      if (!normalized) {
+        return res.status(400).json({
+          success: false,
+          error: `Invalid or unsupported crop: "${crop}". Supported crops: Wheat, Rice, Potato, Onion, Tomato, Fruits`,
+          crop: crop || 'Unknown',
+          cropKey: 'unknown',
+          predictedDemand: 0,
+          predictedDemandKg: 0,
+          unit: 'kg',
+          horizon: '7_days',
+          demandLevel: 'LOW',
+          confidence: 0,
+          explanation: lang === 'hi' ? 'अमान्य या असमर्थित फसल।' : 'Invalid or unsupported crop.',
+          recommendation: lang === 'hi' ? 'कृपया एक समर्थित फसल का चयन करें।' : 'Please select a supported crop.',
+          dataSource: 'unknown',
+        });
+      }
+
+      const orders = await listingStore.getAllOrders({ crop: normalized });
+      const listings = await listingStore.getAllListings({ crop: normalized });
+
+      const prediction = calculate7DayDemand({
+        crop: normalized,
+        orders,
+        listings,
+        lang,
+      });
+
+      return res.json({
+        success: true,
+        ...prediction,
+      });
+    }
+
+    // If all crops or no single crop specified
+    const orders = await listingStore.getAllOrders();
+    const listings = await listingStore.getAllListings();
+
+    const predictions = calculateAllCropsDemand({ orders, listings, lang });
+    const topDemanded = getTopDemandedCropsList(3, { orders, listings, lang });
+
+    res.json({
+      success: true,
+      horizon: '7_days',
+      unit: 'kg',
+      predictions,
+      topDemanded,
+    });
+  } catch (err) {
+    console.error('[Error] GET /api/demand-prediction failure:', err);
+    res.status(500).json({ success: false, error: 'Failed to generate demand prediction' });
+  }
+});
+
+// -------------------------------------------------------------
+// Orders API (Shared Marketplace Orders)
+// -------------------------------------------------------------
+app.get('/api/orders', async (req, res) => {
+  try {
+    const orders = await listingStore.getAllOrders(req.query);
+    res.json({ success: true, count: orders.length, orders });
+  } catch (err) {
+    console.error('[Error] GET /api/orders failure:', err);
+    res.status(500).json({ success: false, error: 'Failed to retrieve orders' });
+  }
+});
+
+app.post('/api/orders', async (req, res) => {
+  try {
+    const newOrder = await listingStore.createOrder(req.body);
+    res.status(201).json({ success: true, order: newOrder });
+  } catch (err) {
+    console.error('[Error] POST /api/orders failure:', err);
+    res.status(500).json({ success: false, error: 'Failed to create order' });
+  }
+});
+
+app.post('/api/orders/reset', async (req, res) => {
+  try {
+    await listingStore.resetOrders();
+    res.json({ success: true, message: 'Orders reset successfully' });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Calibrates produce quality score based on defect severity and visible physical evidence.
+// Strictly separates photographic artifacts (lighting, shadows, clutter) from genuine crop health.
+function calibrateProduceQualityScore(rawScore, defectSeverity) {
+  let score = typeof rawScore === 'number' && !isNaN(rawScore) ? Math.max(0, Math.min(100, rawScore)) : 75;
+  const severity = String(defectSeverity || '').toUpperCase().trim();
+
+  if (severity === 'NONE') {
+    // Defect-free, clean, mature produce: must be Grade A (90-100)
+    // If photographic lighting or camera blur caused raw score to drift below 90, elevate to Grade A.
+    return score < 90 ? Math.max(92, score) : score;
+  }
+
+  if (severity === 'MAJOR') {
+    // Visible rot, mold, deep cuts, or pest infestation: must be Grade C (<75)
+    return score >= 75 ? Math.min(68, score) : score;
+  }
+
+  if (severity === 'MINOR') {
+    // Only minor superficial cosmetic blemishes: must be Grade B (75-89)
+    if (score < 75) return 78;
+    if (score >= 90) return 86;
+    return score;
+  }
+
+  return score;
+}
+
 // Quality check endpoint
 app.post('/api/quality-check', async (req, res) => {
   try {
@@ -352,49 +481,82 @@ app.post('/api/quality-check', async (req, res) => {
     // Initialize GoogleGenAI client strictly on the backend
     const ai = new GoogleGenAI({ apiKey });
 
-    const promptText = `You are an expert agricultural inspection AI specializing in visual quality assessment of fresh produce lots.
-Your role is to strictly inspect the provided photograph of agricultural produce and evaluate its physical quality.
+    const promptText = `You are a certified agricultural produce grading inspector AI for the PRAGATI Indian farmer marketplace.
+Your role is to inspect the photograph of harvested agricultural produce and determine an objective, fair, and calibrated physical quality score.
 The declared crop is: "${crop}".
 
-CRITICAL RULES:
-1. Examine ONLY the physical contents visible in the image.
-2. Verify whether the image actually depicts the declared crop (${crop}).
-3. If the image is NOT agricultural produce, is an entirely different crop, or is too blurry/unclear to identify, return "isProduce": false and "isSuitable": false.
-4. Assess visible physical quality characteristics:
-   - Appearance, shape consistency, and size uniformity.
-   - Visible damage, cuts, bruising, pest blemishes, skin cracks, or fungal/bacterial rot.
-   - Discoloration, dark spots, greening, or uneven ripening.
-   - Firmness / freshness vs shriveling, wilting, or drying.
-5. Quality Score (0 to 100):
-   - 90-100: Premium/Excellent quality. Highly uniform, fresh, defect-free.
-   - 75-89: Good commercial quality. Minor cosmetic blemishes, no deep rot.
-   - 0-74: Fair or substandard quality. Noticeable blemishes, damage, non-uniformity, or spoilage.
-6. Provide an objective confidence score between 0.0 and 1.0 based on image focus, resolution, and lighting.
-7. Provide 3 to 5 concise bullet-point observations describing specifically what is visually observable.
-8. Output MUST be strictly valid JSON matching this schema:
+================================================================================
+CRITICAL PRINCIPLE: SEPARATE CROP QUALITY FROM PHOTO/ENVIRONMENT QUALITY
+================================================================================
+1. CROP QUALITY (Drives "qualityScore"):
+   - Evaluates ONLY the actual physical state of the produce: freshness, maturity, firmness, structural integrity, and absence of rot, fungal decay, disease, or deep physical damage.
+   - Farm-fresh characteristics are EXPECTED and NORMAL in agricultural lots: harmless surface field soil/dust, natural stems or calyxes, and minor natural shape/size variations MUST NOT penalize the crop.
+   - Produce that is healthy, clean or normally farm-handled, and ready for commercial sale belongs in GRADE A (90–100).
 
+2. PHOTO / ENVIRONMENT QUALITY (Drives "confidence" ONLY):
+   - Lighting conditions (dim light, harsh sunlight, uneven shadows), camera resolution, angle, focus, or farm background (gunny sacks, crates, soil, hands holding produce, wooden tables) are PHOTOGRAPHIC FACTORS.
+   - These factors MUST ONLY adjust your "confidence" score (e.g., lower confidence to 0.70–0.85).
+   - NEVER penalize "qualityScore" for poor lighting, shadows, or a cluttered background if the visible crop itself is healthy and sound!
+
+================================================================================
+EXPLICIT GRADE THRESHOLDS & EVIDENCE-BASED SCORING RUBRIC (0 to 100)
+================================================================================
+- GRADE A (Score 90–100) — Prime / Excellent Market Quality:
+  * Produce is clearly healthy, firm, mature, and commercially prime.
+  * Free from active rot, fungal growth, deep cuts, severe bruising, or pest infestation.
+  * Natural field dust/soil that readily washes off, normal stem attachments, and mild natural shape variations are completely acceptable for Grade A.
+  * If the produce has no clearly observable physical defects, set "defectSeverity": "NONE" and assign a score between 90 and 100.
+
+- GRADE B (Score 75–89) — Standard Commercial / Good Quality:
+  * Produce is wholesome, firm, and fully edible/marketable, but exhibits clearly visible minor cosmetic imperfections.
+  * Qualifying minor imperfections include: minor superficial skin scarring, light surface scratches, slight discoloration, or moderate shape irregularity.
+  * Must be completely free of active fungal/bacterial rot, soft decay, or deep open wounds.
+  * Set "defectSeverity": "MINOR" and assign a score between 75 and 89.
+
+- GRADE C (Score 0–74) — Substandard / Defective Quality:
+  * Produce exhibits significant, serious, and tangible defects:
+    - Active soft rot, mold, fungal sporulation, or bacterial decay.
+    - Deep open cuts, severe crushing/bruising, leaking juices, or pest boreholes.
+    - Advanced shriveling, severe wilting, or overripe decomposition.
+  * Every point deduction into Grade C MUST be substantiated by concrete, unmistakable visible evidence.
+  * Set "defectSeverity": "MAJOR" and assign a score between 0 and 74.
+
+================================================================================
+ANTI-HALLUCINATION & AMBIGUITY RULES
+================================================================================
+1. Visible Evidence Only: Deduct points ONLY for defects that you can explicitly see and point out. Never guess, assume, or fabricate defects on hidden sides or in shadowed zones.
+2. Incomplete or Ambiguous Visibility: If shadows, glare, or camera angles obscure portions of the lot, evaluate what is visible. If unobserved portions cannot be verified, state "insufficient visual evidence for obscured portions" in your observations and adjust "confidence", but do NOT invent defects or downgrade the healthy visible crop.
+3. Shadows vs Defects: Do NOT confuse cast shadows, glare, camera flash highlights, or normal color gradients of ripening with dark rot spots or bruising.
+4. Produce Suitability: If the image does NOT depict agricultural produce, is an entirely different crop, or is so severely corrupted/blurred that no produce can be identified, return "isProduce": false and "isSuitable": false.
+
+================================================================================
+OUTPUT SCHEMA (Strictly Valid JSON)
+================================================================================
+For suitable produce:
 {
   "isProduce": true,
   "isSuitable": true,
   "cropIdentified": "${crop}",
-  "qualityScore": 85,
-  "confidence": 0.92,
+  "defectSeverity": "NONE",
+  "qualityScore": 95,
+  "confidence": 0.90,
   "observations": [
-    "Observation 1",
-    "Observation 2",
-    "Observation 3"
+    "Physical Condition: Vibrant natural color, firm texture, and healthy skin integrity.",
+    "Defect Assessment: No visible rot, deep cuts, pest boreholes, or fungal decay.",
+    "Photo & Evidence: Photographic lighting is ambient/dim, but visible crop condition is sound; confidence calibrated accordingly with zero quality penalty."
   ]
 }
 
-If unsuitable or not produce:
+For non-produce or unsuitable images:
 {
   "isProduce": false,
   "isSuitable": false,
   "cropIdentified": "unknown",
+  "defectSeverity": null,
   "qualityScore": null,
-  "confidence": 0.3,
+  "confidence": 0.20,
   "observations": [
-    "Image does not depict the declared crop or lacks visual clarity"
+    "Image does not depict the declared agricultural crop or lacks sufficient visual clarity."
   ]
 }`;
 
@@ -468,9 +630,10 @@ If unsuitable or not produce:
       });
     }
 
-    // Valid quality score clamping (0 to 100)
+    // Valid quality score clamping (0 to 100) and defect severity calibration
     const rawScore = parseInt(parsedResult.qualityScore, 10);
-    const qualityScore = isNaN(rawScore) ? 75 : Math.max(0, Math.min(100, rawScore));
+    const defectSeverity = String(parsedResult.defectSeverity || '').trim();
+    const qualityScore = calibrateProduceQualityScore(rawScore, defectSeverity);
 
     // 6. Application DETERMINISTIC Grading (Thresholds: A >= 90, B >= 75, C < 75)
     const finalGrade = calculateDeterministicGrade(qualityScore);
@@ -735,7 +898,7 @@ CRITICAL RULES:
   }
 });
 
-export { app, calculateDeterministicGrade, invokeGroqWithRetry };
+export { app, calculateDeterministicGrade, invokeGroqWithRetry, calibrateProduceQualityScore };
 export default app;
 
 if (process.env.NODE_ENV !== 'test') {

@@ -306,13 +306,13 @@ export default function DashboardPage({ session, onNavigate, onLogout }) {
         <section className="dashboard-demand-section">
           <div className="d-demand-header">
             <div>
-              <h3 className="d-demand-title">📈 {dpT.forecastTitle || 'Market Demand Forecast'}</h3>
+              <h3 className="d-demand-title">📈 {dpT.forecastTitle || '7-Day Market Demand Forecast'}</h3>
               <p className="d-demand-subtitle">
-                {dpT.forecastSubtitle || 'Near-future market demand predicted from recent transaction orders and marketplace signals.'}
+                {dpT.forecastSubtitle || 'Near-future market demand projected over the next 7 days from transaction velocity and regional benchmarks.'}
               </p>
             </div>
             <span className="d-demand-tagline">
-              ✨ {dpT.basisOrders || 'Based on confirmed marketplace orders'}
+              ✨ {dpT.basisOrders || 'Based on confirmed marketplace orders & regional benchmarks'}
             </span>
           </div>
 
@@ -320,6 +320,7 @@ export default function DashboardPage({ session, onNavigate, onLogout }) {
             {topDemandedCrops.map((cropPred) => {
               const badgeStyle = getDemandBadgeStyle(cropPred.demandLevel)
               const cropDisplayName = farmerT.crops?.[cropPred.cropKey] || cropPred.crop
+              const predictedVol = cropPred.predictedDemand || cropPred.predictedDemandKg || 0
               return (
                 <div key={cropPred.cropKey} className="d-demand-card">
                   <div className="dd-top">
@@ -348,9 +349,9 @@ export default function DashboardPage({ session, onNavigate, onLogout }) {
                   <div className="dd-body">
                     <div className="dd-metric">
                       <span className="dd-qty">
-                        {cropPred.predictedDemandKg > 0 ? `${cropPred.predictedDemandKg} kg` : (dpT.notEnoughData || 'Pending Data')}
+                        {predictedVol > 0 ? `${predictedVol} kg` : (dpT.notEnoughData || 'Pending Data')}
                       </span>
-                      <span className="dd-sub">{dpT.predictedDemand || 'Predicted Volume'}</span>
+                      <span className="dd-sub">{dpT.predictedDemand || 'Predicted Volume (7 Days)'}</span>
                     </div>
 
                     <div className="dd-metric trend">
@@ -363,6 +364,11 @@ export default function DashboardPage({ session, onNavigate, onLogout }) {
 
                   <div className="dd-footer">
                     <span className="dd-rec">{cropPred.recommendation}</span>
+                    {cropPred.dataSource === 'baseline_estimate' && (
+                      <span style={{ display: 'block', fontSize: '0.72rem', color: '#64748b', marginTop: '4px' }}>
+                        ℹ️ {dpT.baselineNotice || 'Baseline estimate'}
+                      </span>
+                    )}
                   </div>
                 </div>
               )

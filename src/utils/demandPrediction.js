@@ -1,23 +1,28 @@
 // src/utils/demandPrediction.js
-// Deterministic AI Demand Prediction Engine for SIH 2026 Agricultural Marketplace
-// Pure deterministic forecasting utility using marketplace transaction & listing signals
+// 7-Day Crop Demand Forecasting Engine for PRAGATI Agricultural Marketplace
+// Time-windowed velocity forecasting with crop-specific benchmarks, low-data fallback, and backend synchronization.
 
 export const BUYER_ORDERS_STORAGE_KEY = 'sih_buyer_orders'
 export const FARMER_LISTINGS_STORAGE_KEY = 'sih_farmer_listings'
 
 export const SUPPORTED_CROPS = ['Wheat', 'Rice', 'Potato', 'Onion', 'Tomato', 'Fruits']
 
-/**
- * Predefined baseline consumption demand (in kg) per crop for market normalization
- */
-export const CROP_BASELINE_DEMAND = {
-  wheat: 500,
-  rice: 400,
-  potato: 300,
-  onion: 250,
-  tomato: 150,
-  fruits: 150,
+// ============================================================================
+// DEMO/BASELINE VALUES: Realistic 7-day regional demand benchmarks (in kg)
+// for Indian agricultural mandis and local collection hubs.
+// Used as fallback when real platform order history is zero or too small.
+// ============================================================================
+export const CROP_7DAY_BASELINE_DEMAND = {
+  wheat: 1200,   // High-volume staple grain (~12 quintals per hub/week)
+  rice: 1000,    // Primary staple cereal (~10 quintals per hub/week)
+  potato: 750,   // High-consumption tuber staple (~7.5 quintals per hub/week)
+  onion: 600,    // High daily turnover vegetable (~6 quintals per hub/week)
+  tomato: 450,   // Perishable vegetable with continuous daily replenishment (~4.5 quintals per hub/week)
+  fruits: 350,   // Perishable mixed seasonal fruits (~3.5 quintals per hub/week)
 }
+
+// Backward-compatibility alias
+export const CROP_BASELINE_DEMAND = CROP_7DAY_BASELINE_DEMAND
 
 /**
  * Crop key alias dictionary supporting English and Hindi variants
@@ -112,83 +117,65 @@ function extractQuantityKg(order) {
 }
 
 /**
- * Generates transparent bilingual explanation based on trend and market signals
+ * Generates transparent bilingual explanation based on data source and trend
  */
-function buildExplanation(trendPercent, orderCount, lang = 'en') {
+function buildExplanation({ cropName, predictedDemand, dataSource, trendPercent, lang = 'en', orderCount = 0 }) {
   const isHi = lang === 'hi'
 
-  if (orderCount === 0) {
+  if (dataSource === 'baseline_estimate') {
     return isHi
-      ? 'मांग का पूर्वानुमान लगाने के लिए पर्याप्त लेन-देन डेटा अभी उपलब्ध नहीं है।'
-      : 'Not enough transaction data yet to forecast demand.'
+      ? `क्षेत्रीय मंडी खपत के आधार पर अगले 7 दिनों के लिए ${cropName} की अनुमानित मांग ${predictedDemand.toLocaleString()} kg है (आधारभूत अनुमान)।`
+      : `Projected 7-day demand is ${predictedDemand.toLocaleString()} kg based on regional mandi consumption benchmarks (baseline estimate).`
   }
 
-  if (orderCount === 1) {
+  if (dataSource === 'limited_marketplace_data') {
     return isHi
-      ? 'प्रारंभिक एकल लेन-देन का पता चला; अधिक ऑर्डरों के साथ विश्वास बढ़ेगा।'
-      : 'Early single transaction detected; confidence will grow with more orders.'
+      ? `प्रारंभिक ${orderCount} ऑर्डरों और मंडी आधारभूत रुझानों के आधार पर अगले 7 दिनों में मांग ~${predictedDemand.toLocaleString()} kg अनुमानित है।`
+      : `Demand is estimated at ~${predictedDemand.toLocaleString()} kg for the next 7 days combining ${orderCount} early platform order(s) with regional benchmarks.`
   }
 
-  if (trendPercent >= 20) {
+  if (trendPercent >= 15) {
     return isHi
-      ? 'हाल के खरीदार ऑर्डरों के आधार पर मांग +' + trendPercent + '% तेजी से बढ़ रही है।'
-      : 'Demand is increasing rapidly (+' + trendPercent + '%) based on recent buyer orders.'
+      ? `हाल के ऑर्डरों में मांग तेजी से बढ़ रही है (+${trendPercent}%)। अगले 7 दिनों में ${predictedDemand.toLocaleString()} kg की अपेक्षित बिक्री है।`
+      : `Demand is trending strongly upward (+${trendPercent}%) across confirmed marketplace orders. Projected 7-day volume: ${predictedDemand.toLocaleString()} kg.`
   }
 
-  if (trendPercent > 5) {
+  if (trendPercent <= -15) {
     return isHi
-      ? 'हाल के ऑर्डरों में मांग लगातार बढ़ रही है (+' + trendPercent + '%)।'
-      : 'Demand is steadily growing (+' + trendPercent + '%) across recent buyer orders.'
-  }
-
-  if (trendPercent >= -5) {
-    return isHi
-      ? 'मांग स्थिर है और खरीदारों का रुझान नियमित बना हुआ है।'
-      : 'Demand is stable with consistent buyer purchasing patterns.'
-  }
-
-  if (trendPercent >= -20) {
-    return isHi
-      ? 'हाल के लेन-देन में मांग में मामूली गिरावट (' + trendPercent + '%) देखी गई है।'
-      : 'Demand is slightly easing (' + trendPercent + '%) in recent transactions.'
+      ? `हाल के ऑर्डरों में मांग में गिरावट (${trendPercent}%) देखी गई है। अगले 7 दिनों की अनुमानित मांग ${predictedDemand.toLocaleString()} kg है।`
+      : `Order momentum has softened (${trendPercent}%). Projected 7-day marketplace demand: ${predictedDemand.toLocaleString()} kg.`
   }
 
   return isHi
-    ? 'पहले के ऑर्डरों की तुलना में मांग धीमी (' + trendPercent + '%) हो गई है।'
-    : 'Demand has slowed down (' + trendPercent + '%) compared to earlier orders.'
+    ? `नियमित खरीदार ऑर्डरों के आधार पर अगले 7 दिनों में मांग स्थिर (${predictedDemand.toLocaleString()} kg) बनी हुई है।`
+    : `Market demand is steady based on regular confirmed orders. Projected 7-day volume: ${predictedDemand.toLocaleString()} kg.`
 }
 
 /**
  * Generates actionable recommendation for farmers and buyers
  */
-function buildRecommendation(demandLevel, hasEnoughData, lang = 'en') {
+function buildRecommendation(demandLevel, lang = 'en') {
   const isHi = lang === 'hi'
-
-  if (!hasEnoughData) {
-    return isHi
-      ? 'शुरुआती खरीदार रुचि जानने के लिए अपनी उपज सूचीबद्ध करें।'
-      : 'List your produce to test early buyer interest.'
-  }
 
   if (demandLevel === 'HIGH') {
     return isHi
-      ? 'उच्च मांग — यह अपनी फसल सूचीबद्ध करने का सही समय है।'
-      : 'High demand — this may be a good time to list this crop.'
+      ? 'उच्च मांग — उपज सूचीबद्ध करने और प्रतिस्पर्धी लाभ लेने का यह सर्वोत्तम समय है।'
+      : 'High demand — favorable market window to list produce at premium rates.'
   }
 
   if (demandLevel === 'MEDIUM') {
     return isHi
-      ? 'मध्यम मांग — सूची बनाने से पहले प्रतिस्पर्धी मूल्यों की जांच करें।'
-      : 'Moderate demand — check competitive pricing before listing.'
+      ? 'मध्यम मांग — नियमित बिक्री के लिए प्रतिस्पर्धी बाजार मूल्य पर सूचीबद्ध करें।'
+      : 'Moderate demand — list harvest with competitive pricing for steady turnaround.'
   }
 
   return isHi
-    ? 'कम मांग — सूची बनाने से पहले कीमत की समीक्षा करें या हब एकत्रीकरण चुनें।'
-    : 'Low demand — consider checking price before listing.'
+    ? 'कम मांग — तत्काल बिक्री के लिए स्थानीय हब एकत्रीकरण या थोक सौदे पर विचार करें।'
+    : 'Lower demand — consider local hub aggregation or flexible pricing for faster clearance.'
 }
 
 /**
- * Forecasts demand for a specific crop deterministically
+ * Forecasts 7-day demand for a specific crop deterministically
  */
 export function predictCropDemand({ crop, orders, listings, lang = 'en' } = {}) {
   const cropKey = normalizeCropKey(crop)
@@ -198,18 +185,27 @@ export function predictCropDemand({ crop, orders, listings, lang = 'en' } = {}) 
     return {
       crop: crop || 'Unknown',
       cropKey: 'unknown',
-      historicalDemandKg: 0,
-      averageDemandKg: 0,
-      recentDemandKg: 0,
+      predictedDemand: 0,
       predictedDemandKg: 0,
-      trendPercent: 0,
+      unit: 'kg',
+      horizon: '7_days',
       demandLevel: 'LOW',
       confidence: 0,
       hasEnoughData: false,
       explanation: isHi ? 'अमान्य या असमर्थित फसल।' : 'Invalid or unsupported crop.',
       recommendation: isHi ? 'कृपया एक समर्थित फसल का चयन करें।' : 'Please select a supported crop.',
+      dataSource: 'unknown',
+      benchmarkKg: 0,
+      trendPercent: 0,
+      orderCount: 0,
+      historicalDemandKg: 0,
+      averageDemandKg: 0,
+      recentDemandKg: 0,
     }
   }
+
+  const cropName = CROP_DISPLAY_NAMES[cropKey]
+  const baseline7d = CROP_7DAY_BASELINE_DEMAND[cropKey] || 500
 
   const allOrders = getSafeOrders(orders)
   const allListings = getSafeListings(listings)
@@ -228,32 +224,47 @@ export function predictCropDemand({ crop, orders, listings, lang = 'en' } = {}) 
     return itemCrop === cropKey
   })
 
-  const N = cropOrders.length
-  const baselineReference = CROP_BASELINE_DEMAND[cropKey] || 150
+  const orderCount = cropOrders.length
 
-  // 1. Case: Zero historical orders
-  if (N === 0) {
+  // --------------------------------------------------------------------------
+  // SCENARIO 1: ZERO ORDERS (Low-Data Fallback to Crop-Specific Baseline)
+  // --------------------------------------------------------------------------
+  if (orderCount === 0) {
     const listingSupplyKg = cropListings.reduce((sum, item) => sum + (parseFloat(item.quantity) || 0), 0)
-    const confidence = cropListings.length > 0 ? 35 : 25
+    // Honest confidence: 30% default; 35% if listings present
+    const confidence = listingSupplyKg > 0 ? 35 : 30
 
     return {
-      crop: CROP_DISPLAY_NAMES[cropKey],
+      crop: cropName,
       cropKey,
-      historicalDemandKg: 0,
-      averageDemandKg: 0,
-      recentDemandKg: 0,
-      predictedDemandKg: 0,
-      trendPercent: 0,
-      demandLevel: 'LOW',
+      predictedDemand: baseline7d,
+      predictedDemandKg: baseline7d,
+      unit: 'kg',
+      horizon: '7_days',
+      demandLevel: 'MEDIUM', // Realistic baseline represents expected benchmark
       confidence,
       hasEnoughData: false,
       listingSupplyKg: Math.round(listingSupplyKg),
-      explanation: buildExplanation(0, 0, lang),
-      recommendation: buildRecommendation('LOW', false, lang),
+      explanation: buildExplanation({
+        cropName,
+        predictedDemand: baseline7d,
+        dataSource: 'baseline_estimate',
+        trendPercent: 0,
+        lang,
+        orderCount: 0,
+      }),
+      recommendation: buildRecommendation('MEDIUM', lang),
+      dataSource: 'baseline_estimate',
+      benchmarkKg: baseline7d,
+      trendPercent: 0,
+      orderCount: 0,
+      historicalDemandKg: 0,
+      averageDemandKg: 0,
+      recentDemandKg: 0,
     }
   }
 
-  // Calculate order quantities sorted chronologically
+  // Calculate chronological orders
   const chronologicalOrders = [...cropOrders].sort((a, b) => {
     const timeA = a.createdAt ? new Date(a.createdAt).getTime() : 0
     const timeB = b.createdAt ? new Date(b.createdAt).getTime() : 0
@@ -265,111 +276,138 @@ export function predictCropDemand({ crop, orders, listings, lang = 'en' } = {}) 
     .filter((q) => q > 0)
 
   const validN = quantities.length
+  const totalHistoricalVolumeKg = Math.round(quantities.reduce((sum, q) => sum + q, 0))
 
   if (validN === 0) {
     return {
-      crop: CROP_DISPLAY_NAMES[cropKey],
+      crop: cropName,
       cropKey,
+      predictedDemand: baseline7d,
+      predictedDemandKg: baseline7d,
+      unit: 'kg',
+      horizon: '7_days',
+      demandLevel: 'MEDIUM',
+      confidence: 30,
+      hasEnoughData: false,
+      explanation: buildExplanation({
+        cropName,
+        predictedDemand: baseline7d,
+        dataSource: 'baseline_estimate',
+        trendPercent: 0,
+        lang,
+        orderCount: 0,
+      }),
+      recommendation: buildRecommendation('MEDIUM', lang),
+      dataSource: 'baseline_estimate',
+      benchmarkKg: baseline7d,
+      trendPercent: 0,
+      orderCount: 0,
       historicalDemandKg: 0,
       averageDemandKg: 0,
       recentDemandKg: 0,
-      predictedDemandKg: 0,
-      trendPercent: 0,
-      demandLevel: 'LOW',
-      confidence: 25,
-      hasEnoughData: false,
-      explanation: buildExplanation(0, 0, lang),
-      recommendation: buildRecommendation('LOW', false, lang),
     }
   }
 
-  const historicalDemandKg = Math.round(quantities.reduce((sum, q) => sum + q, 0))
-  const averageDemandKg = Math.round((historicalDemandKg / validN) * 10) / 10
+  // --------------------------------------------------------------------------
+  // SCENARIO 2 & 3: TIME-WINDOWED VELOCITY & PROJECTION
+  // --------------------------------------------------------------------------
+  const firstTime = chronologicalOrders[0]?.createdAt ? new Date(chronologicalOrders[0].createdAt).getTime() : Date.now()
+  const lastTime = chronologicalOrders[chronologicalOrders.length - 1]?.createdAt
+    ? new Date(chronologicalOrders[chronologicalOrders.length - 1].createdAt).getTime()
+    : Date.now()
 
-  // 2. Case: Single historical order
-  if (validN === 1) {
-    const singleQty = quantities[0]
-    const predictedDemandKg = Math.round(singleQty)
-    const ratio = baselineReference > 0 ? (predictedDemandKg / baselineReference) : 1.0
+  const elapsedMs = Math.max(0, lastTime - firstTime)
+  const elapsedDays = Math.max(1, Math.min(30, elapsedMs / (1000 * 60 * 60 * 24)))
 
-    let demandLevel = 'MEDIUM'
-    if (ratio >= 1.5) demandLevel = 'HIGH'
-    else if (ratio < 0.8) demandLevel = 'LOW'
+  const dailyVelocity = totalHistoricalVolumeKg / elapsedDays
+  const raw7dVelocityDemand = dailyVelocity * 7
 
-    return {
-      crop: CROP_DISPLAY_NAMES[cropKey],
-      cropKey,
-      historicalDemandKg,
-      averageDemandKg,
-      recentDemandKg: Math.round(singleQty),
-      predictedDemandKg,
-      trendPercent: 0,
-      demandLevel,
-      confidence: 50,
-      hasEnoughData: false,
-      explanation: buildExplanation(0, 1, lang),
-      recommendation: buildRecommendation(demandLevel, false, lang),
+  let trendPercent = 0
+  let trendMultiplier = 1.0
+
+  if (validN >= 3) {
+    const half = Math.floor(validN / 2)
+    const pastSlice = quantities.slice(0, half)
+    const recentSlice = quantities.slice(half)
+
+    const pastSum = pastSlice.reduce((s, q) => s + q, 0)
+    const recentSum = recentSlice.reduce((s, q) => s + q, 0)
+
+    const pastAvg = pastSlice.length > 0 ? pastSum / pastSlice.length : 1
+    const recentAvg = recentSlice.length > 0 ? recentSum / recentSlice.length : 1
+
+    if (pastAvg > 0) {
+      const rawTrend = Math.round(((recentAvg - pastAvg) / pastAvg) * 100)
+      trendPercent = Math.max(-80, Math.min(150, rawTrend))
+      trendMultiplier = Math.max(0.70, Math.min(1.40, 1 + (trendPercent / 100)))
     }
   }
 
-  // 3. Case: Multiple historical orders (N >= 2) -> Full trend & weighted forecast
-  const recentCount = Math.max(1, Math.floor(validN / 2))
-  const pastCount = validN - recentCount
+  const orderDrivenDemand7d = raw7dVelocityDemand * trendMultiplier
 
-  const pastSlice = quantities.slice(0, pastCount)
-  const recentSlice = quantities.slice(pastCount)
+  // Bayesian blending with crop baseline
+  const dataWeight = Math.min(1.0, validN / 6)
+  const blendedPredictedDemand = Math.round((dataWeight * orderDrivenDemand7d) + ((1 - dataWeight) * baseline7d))
+  const finalPredictedDemand = Math.max(50, blendedPredictedDemand)
 
-  const pastSum = pastSlice.reduce((sum, q) => sum + q, 0)
-  const recentSum = recentSlice.reduce((sum, q) => sum + q, 0)
-
-  const pastAvg = pastCount > 0 ? pastSum / pastCount : pastSum
-  const recentAvg = recentCount > 0 ? recentSum / recentCount : recentSum
-
-  let rawTrendPercent = 0
-  if (pastAvg > 0) {
-    rawTrendPercent = Math.round(((recentAvg - pastAvg) / pastAvg) * 100)
-  }
-  const trendPercent = Math.max(-80, Math.min(150, rawTrendPercent))
-
-  const trendMultiplier = 1 + (trendPercent / 100)
-  const rawPredicted = (0.7 * recentAvg) + (0.3 * averageDemandKg * trendMultiplier)
-  const predictedDemandKg = Math.max(0, Math.round(rawPredicted))
-
-  // Determine demand level against baseline (average order volume or crop baseline)
-  const baseline = averageDemandKg > 0 ? averageDemandKg : baselineReference
-  const ratio = baseline > 0 ? (predictedDemandKg / baseline) : 1.0
+  // Crop-specific normalization against benchmark
+  const ratio = baseline7d > 0 ? finalPredictedDemand / baseline7d : 1.0
 
   let demandLevel = 'MEDIUM'
-  if (ratio >= 1.5) {
+  if (ratio >= 1.15) {
     demandLevel = 'HIGH'
-  } else if (ratio < 0.8) {
+  } else if (ratio < 0.75) {
     demandLevel = 'LOW'
   }
 
-  let confidence = 65
-  if (validN >= 5) {
-    confidence = Math.min(92, 80 + (validN * 2))
+  // Honest confidence scoring
+  let confidence = 45
+  let dataSource = 'limited_marketplace_data'
+
+  if (validN >= 6) {
+    confidence = Math.min(85, 75 + Math.min(10, Math.floor((validN - 6) * 1.5)))
+    dataSource = 'marketplace_orders'
   } else if (validN >= 3) {
-    confidence = 75 + (validN * 2)
+    confidence = 60 + (validN * 2)
+    dataSource = 'marketplace_orders'
   } else {
-    confidence = 68
+    confidence = 45 + (validN * 5)
+    dataSource = 'limited_marketplace_data'
   }
 
+  const averageDemandKg = Math.round((totalHistoricalVolumeKg / validN) * 10) / 10
+  const recentDemandKg = Math.round(quantities[quantities.length - 1] || 0)
+
   return {
-    crop: CROP_DISPLAY_NAMES[cropKey],
+    crop: cropName,
     cropKey,
-    historicalDemandKg,
-    averageDemandKg: Math.round(averageDemandKg),
-    recentDemandKg: Math.round(recentAvg),
-    predictedDemandKg,
-    trendPercent,
+    predictedDemand: finalPredictedDemand,
+    predictedDemandKg: finalPredictedDemand,
+    unit: 'kg',
+    horizon: '7_days',
     demandLevel,
     confidence,
-    hasEnoughData: true,
-    explanation: buildExplanation(trendPercent, validN, lang),
-    recommendation: buildRecommendation(demandLevel, true, lang),
+    hasEnoughData: validN >= 2,
+    explanation: buildExplanation({
+      cropName,
+      predictedDemand: finalPredictedDemand,
+      dataSource,
+      trendPercent,
+      lang,
+      orderCount: validN,
+    }),
+    recommendation: buildRecommendation(demandLevel, lang),
+    dataSource,
+    benchmarkKg: baseline7d,
+    trendPercent,
+    orderCount: validN,
+    historicalDemandKg: totalHistoricalVolumeKg,
+    averageDemandKg: Math.round(averageDemandKg),
+    recentDemandKg,
   }
 }
+
+export const calculate7DayDemand = predictCropDemand
 
 /**
  * Forecasts demand across all 6 supported crops
@@ -381,16 +419,15 @@ export function predictAllCropsDemand({ orders, listings, lang = 'en' } = {}) {
 }
 
 /**
- * Returns top demanded crops sorted by predicted volume and demand level
+ * Returns top demanded crops sorted by demand level and predicted volume
  */
 export function getTopDemandedCrops(limit = 3, options = {}) {
   const all = predictAllCropsDemand(options)
-
   const priorityScore = { HIGH: 3000, MEDIUM: 2000, LOW: 1000 }
 
   const sorted = [...all].sort((a, b) => {
-    const scoreA = (priorityScore[a.demandLevel] || 0) + a.predictedDemandKg
-    const scoreB = (priorityScore[b.demandLevel] || 0) + b.predictedDemandKg
+    const scoreA = (priorityScore[a.demandLevel] || 0) + (a.predictedDemand || a.predictedDemandKg || 0)
+    const scoreB = (priorityScore[b.demandLevel] || 0) + (b.predictedDemand || b.predictedDemandKg || 0)
     return scoreB - scoreA
   })
 
@@ -431,4 +468,27 @@ export function getDemandBadgeStyle(demandLevel) {
         labelHi: 'कम मांग',
       }
   }
+}
+
+/**
+ * Asynchronously fetches demand prediction from backend API with fallback to local calculation
+ */
+export async function fetchDemandPrediction({ crop, lang = 'en' } = {}) {
+  if (typeof window !== 'undefined' && window.fetch) {
+    try {
+      const url = crop
+        ? `/api/demand-prediction?crop=${encodeURIComponent(crop)}&lang=${encodeURIComponent(lang)}`
+        : `/api/demand-prediction?lang=${encodeURIComponent(lang)}`
+      const res = await fetch(url)
+      if (res.ok) {
+        const data = await res.json()
+        if (data.success) {
+          return data
+        }
+      }
+    } catch {
+      // Graceful fallback to client calculation
+    }
+  }
+  return predictCropDemand({ crop, lang })
 }
