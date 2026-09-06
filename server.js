@@ -535,6 +535,266 @@ function sanitizeAndValidateProduceImage(image, mimeType) {
   };
 }
 
+// Extracts balanced curly braces from string starting at startIndex
+function extractBalancedBraces(str, startIndex) {
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+
+  for (let i = startIndex; i < str.length; i++) {
+    const char = str[i];
+
+    if (escape) {
+      escape = false;
+      continue;
+    }
+
+    if (char === '\\') {
+      escape = true;
+      continue;
+    }
+
+    if (char === '"') {
+      inString = !inString;
+      continue;
+    }
+
+    if (!inString) {
+      if (char === '{') {
+        depth++;
+      } else if (char === '}') {
+        depth--;
+        if (depth === 0) {
+          return str.slice(startIndex, i + 1);
+        }
+      }
+    }
+  }
+
+  // Fallback: if braces did not balance, find last '}'
+  const lastClose = str.lastIndexOf('}');
+  if (lastClose > startIndex) {
+    return str.slice(startIndex, lastClose + 1);
+  }
+
+  return null;
+}
+
+// Extracts the first balanced JSON object from arbitrary text containing reasoning or markdown
+function extractFirstJsonObject(text) {
+  if (!text || typeof text !== 'string') return null;
+
+  // 1. Strip think/thought tags first (including unclosed tags)
+  const clean = text
+    .replace(/<think>[\s\S]*?<\/think>/gi, '')
+    .replace(/<think>[\s\S]*$/gi, '')
+    .replace(/<thought>[\s\S]*?(?:<\/thought>|$)/gi, '')
+    .trim();
+
+  // 2. If markdown code fence exists, try inside code fence first
+  const fenceMatch = clean.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  const searchSpace = fenceMatch ? fenceMatch[1].trim() : clean;
+
+  const firstOpen = searchSpace.indexOf('{');
+  if (firstOpen === -1) {
+    const fallbackOpen = clean.indexOf('{');
+    if (fallbackOpen === -1) return null;
+    return extractBalancedBraces(clean, fallbackOpen);
+  }
+
+  return extractBalancedBraces(searchSpace, firstOpen);
+}
+
+// Safely parses JSON with automatic repair for common LLM formatting artifacts
+function parseJsonLenient(jsonStr) {
+  try {
+    return JSON.parse(jsonStr);
+  } catch {
+    const repaired = jsonStr
+      .replace(/[\u201C\u201D]/g, '"') // smart double quotes
+      .replace(/[\u2018\u2019]/g, "'") // smart single quotes
+      .replace(/,\s*([}\]])/g, '$1') // trailing commas
+      .replace(/:\s*True\b/g, ': true')
+      .replace(/:\s*False\b/g, ': false')
+      .replace(/:\s*None\b/g, ': null');
+
+    return JSON.parse(repaired);
+  }
+}
+
+// Normalizes grade safely to A, B, or C
+function normalizeGrade(rawGrade, qualityScore) {
+  if (typeof rawGrade === 'string') {
+    const trimmed = rawGrade.trim().toUpperCase();
+    const match = trimmed.match(/\b([ABC])\b/);
+    if (match) {
+      return match[1];
+    }
+  }
+  if (typeof qualityScore === 'number' && !isNaN(qualityScore)) {
+    return calculateDeterministicGrade(qualityScore);
+  }
+  return null;
+}
+
+// Normalizes observations field into an array of non-empty strings
+function normalizeObservations(rawObs) {
+  if (Array.isArray(rawObs)) {
+    const arr = rawObs.map((o) => String(o).trim()).filter(Boolean);
+    return arr.length > 0 ? arr : ['Physical inspection completed'];
+  }
+  if (typeof rawObs === 'string' && rawObs.trim().length > 0) {
+    const lines = rawObs
+      .split(/\n+/)
+      .map((l) => l.replace(/^[-*•\d.]+\s*/, '').trim())
+      .filter(Boolean);
+    return lines.length > 0 ? lines : [rawObs.trim()];
+  }
+  return ['Physical inspection completed'];
+}
+
+// Fallback parser for pseudo-JSON formats (e.g. bulleted key-value lists emitted by reasoning models)
+function parsePseudoJson(text) {
+  if (!text || typeof text !== 'string') return null;
+  const obj = {};
+  const lines = text.split('\n');
+  let hasAnyKey = false;
+  for (const line of lines) {
+    const match = line.match(/[*•-]?\s*['"]?([a-zA-Z0-9_]+)['"]?\s*:\s*(.+)/);
+    if (match) {
+      const key = match[1].trim();
+      let valStr = match[2].trim().replace(/^['"]+|['"]+$/g, '');
+      if (valStr.endsWith(',')) valStr = valStr.slice(0, -1).trim();
+
+      if (['isProduce', 'isSuitable', 'qualityScore', 'grade', 'confidence', 'defectSeverity', 'cropIdentified', 'observations'].includes(key)) {
+        hasAnyKey = true;
+        if (valStr === 'true') obj[key] = true;
+        else if (valStr === 'false') obj[key] = false;
+        else if (valStr === 'null') obj[key] = null;
+        else if (!isNaN(Number(valStr)) && valStr !== '') obj[key] = Number(valStr);
+        else if (valStr.startsWith('[') && valStr.endsWith(']')) {
+          try {
+            obj[key] = JSON.parse(valStr.replace(/'/g, '"'));
+          } catch {
+            obj[key] = [valStr.slice(1, -1).trim()];
+          }
+        } else {
+          obj[key] = valStr;
+        }
+      }
+    }
+  }
+  return hasAnyKey && (obj.isProduce !== undefined || obj.qualityScore !== undefined) ? obj : null;
+}
+
+// Comprehensive parser and validator for model quality assessment outputs
+function parseAndValidateAssessment(rawText, declaredCrop) {
+  if (!rawText || typeof rawText !== 'string' || rawText.trim().length === 0) {
+    throw new Error('Empty response received from Groq Vision model.');
+  }
+
+  let parsed = null;
+  const jsonChunk = extractFirstJsonObject(rawText);
+  if (jsonChunk) {
+    try {
+      parsed = parseJsonLenient(jsonChunk);
+    } catch {
+      parsed = null;
+    }
+  }
+
+  // Fallback: try parsing pseudo-JSON if jsonChunk extraction or parsing failed
+  if (!parsed || typeof parsed !== 'object') {
+    parsed = parsePseudoJson(rawText);
+  }
+
+  if (!parsed || typeof parsed !== 'object') {
+    throw new Error('No valid JSON or recognizable assessment structure found in model output.');
+  }
+
+  // Validate produce & suitability
+  const isProduce = Boolean(parsed.isProduce);
+  const isSuitable = Boolean(parsed.isSuitable);
+  const cropIdentified = String(parsed.cropIdentified || declaredCrop || 'unknown').trim();
+
+  // Normalize observations
+  const observations = normalizeObservations(parsed.observations);
+
+  // If unsuitable or not produce
+  if (!isProduce || !isSuitable || parsed.qualityScore === null || parsed.qualityScore === undefined) {
+    let conf = typeof parsed.confidence === 'number' ? parsed.confidence : 20;
+    if (conf > 1) conf = conf / 100;
+    return {
+      status: 'UNSUITABLE',
+      isProduce: false,
+      isSuitable: false,
+      cropIdentified: 'unknown',
+      defectSeverity: null,
+      qualityScore: null,
+      grade: null,
+      confidence: Math.max(0, Math.min(1, parseFloat(conf.toFixed(2)))),
+      observations,
+    };
+  }
+
+  // Normalize numeric qualityScore (clamped 0-100)
+  let rawScore = parsed.qualityScore;
+  if (typeof rawScore === 'string') {
+    const numMatch = rawScore.match(/\d+/);
+    rawScore = numMatch ? parseInt(numMatch[0], 10) : NaN;
+  } else if (typeof rawScore === 'number') {
+    rawScore = Math.round(rawScore);
+  }
+
+  if (typeof rawScore !== 'number' || isNaN(rawScore)) {
+    const g = normalizeGrade(parsed.grade);
+    if (g === 'A') rawScore = 92;
+    else if (g === 'B') rawScore = 80;
+    else if (g === 'C') rawScore = 65;
+    else throw new Error('Missing or invalid qualityScore in model assessment.');
+  }
+
+  rawScore = Math.max(0, Math.min(100, rawScore));
+
+  // Normalize grade safely
+  const gradeExtracted = normalizeGrade(parsed.grade, rawScore);
+
+  // Normalize defectSeverity or infer it if not provided
+  let defectSeverity = parsed.defectSeverity;
+  if (!defectSeverity) {
+    if (gradeExtracted === 'A' || rawScore >= 90) defectSeverity = 'NONE';
+    else if (gradeExtracted === 'B' || rawScore >= 75) defectSeverity = 'MINOR';
+    else defectSeverity = 'MAJOR';
+  }
+
+  // Normalize confidence (clamped 0-100, mapped to decimal for frontend)
+  let rawConf = parsed.confidence;
+  if (typeof rawConf === 'string') {
+    const confMatch = rawConf.match(/[\d.]+/);
+    rawConf = confMatch ? parseFloat(confMatch[0]) : NaN;
+  }
+  let confidenceVal = 85;
+  if (typeof rawConf === 'number' && !isNaN(rawConf)) {
+    confidenceVal = Math.max(0, Math.min(100, rawConf));
+  }
+
+  const confidence = confidenceVal > 1
+    ? parseFloat((confidenceVal / 100).toFixed(2))
+    : parseFloat(confidenceVal.toFixed(2));
+
+  return {
+    status: 'ASSESSED',
+    isProduce: true,
+    isSuitable: true,
+    cropIdentified,
+    defectSeverity,
+    qualityScore: rawScore,
+    grade: gradeExtracted,
+    confidence,
+    observations,
+  };
+}
+
 // Quality check endpoint (Powered by Groq Vision)
 app.post('/api/quality-check', async (req, res) => {
   try {
@@ -622,35 +882,47 @@ ANTI-HALLUCINATION & AMBIGUITY RULES
 4. Produce Suitability: If the image does NOT depict agricultural produce, is an entirely different crop, or is so severely corrupted/blurred that no produce can be identified, return "isProduce": false and "isSuitable": false.
 
 ================================================================================
-OUTPUT SCHEMA (Strictly Valid JSON)
+CRITICAL OUTPUT FORMAT INSTRUCTIONS:
+Return ONLY one valid JSON object.
+Do not use markdown.
+Do not use code fences.
+Do not include <think> tags or reasoning.
+Do not output markdown.
+Do not output bullets.
+Do not output reasoning.
+Do not output <think>.
+Do not output any text outside the JSON object.
 ================================================================================
-For suitable produce:
+Expected JSON format for suitable produce:
 {
   "isProduce": true,
   "isSuitable": true,
-  "cropIdentified": "${crop}",
-  "defectSeverity": "NONE",
   "qualityScore": 95,
-  "confidence": 0.90,
+  "grade": "A",
+  "confidence": 90,
   "observations": [
-    "Physical Condition: Vibrant natural color, firm texture, and healthy skin integrity.",
-    "Defect Assessment: No visible rot, deep cuts, pest boreholes, or fungal decay.",
-    "Photo & Evidence: Photographic lighting is ambient/dim, but visible crop condition is sound; confidence calibrated accordingly with zero quality penalty."
+    "Healthy crop appearance",
+    "No visible major damage"
   ]
 }
 
-For non-produce or unsuitable images:
+Expected JSON format for non-produce or unsuitable images:
 {
   "isProduce": false,
   "isSuitable": false,
-  "cropIdentified": "unknown",
-  "defectSeverity": null,
   "qualityScore": null,
-  "confidence": 0.20,
+  "grade": null,
+  "confidence": 20,
   "observations": [
     "Image does not depict the declared agricultural crop or lacks sufficient visual clarity."
   ]
-}`;
+}
+================================================================================
+GRADE SCORING REFERENCE:
+- GRADE A: score 90-100, defectSeverity NONE
+- GRADE B: score 75-89, defectSeverity MINOR
+- GRADE C: score 0-74, defectSeverity MAJOR
+================================================================================`;
 
     const candidateVisionModels = [
       GROQ_VISION_MODEL_ID,
@@ -682,6 +954,10 @@ For non-produce or unsuitable images:
                 ],
               },
             ],
+            response_format: {
+              type: 'json_object',
+            },
+            reasoning_format: 'hidden',
             temperature: 0.1,
             max_tokens: 1000,
           })
@@ -709,80 +985,59 @@ For non-produce or unsuitable images:
     const rawText = chatCompletion?.choices?.[0]?.message?.content || '';
     console.log('[Groq Vision] Raw response received.');
 
-    // 4. Safely extract and parse JSON from model output
+    // 4. Safely extract and parse JSON from model output using robust parser
     let parsedResult = null;
     try {
-      // Strip reasoning/think tokens if emitted by Qwen or reasoning models
-      const sanitized = rawText.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
-      // Strip markdown code fences if present
-      const withoutFences = sanitized
-        .replace(/^```(?:json)?\s*/i, '')
-        .replace(/\s*```$/i, '')
-        .trim();
-      // Find outermost JSON object
-      const jsonMatch = withoutFences.match(/\{[\s\S]*\}/);
-      const jsonStr = jsonMatch ? jsonMatch[0] : withoutFences;
-      parsedResult = JSON.parse(jsonStr);
+      parsedResult = parseAndValidateAssessment(rawText, crop);
     } catch (parseErr) {
-      console.error('[Groq Vision] Failed to parse model JSON output:', parseErr.message, rawText);
+      console.error('[Groq Vision] Failed to parse model JSON output:', {
+        model: usedModel,
+        error: parseErr.message,
+        rawPreview: (rawText || '').slice(0, 500).replace(/gsk_[a-zA-Z0-9_-]+/g, '[REDACTED]'),
+      });
       return res.status(502).json({
         success: false,
         error: 'Model returned malformed assessment output.',
         code: 'MALFORMED_MODEL_OUTPUT',
-        rawText: rawText.slice(0, 300),
+        details: parseErr.message,
+        rawText: (rawText || '').slice(0, 300),
       });
     }
 
-    // 5. Validate model output structure
-    const isProduce = Boolean(parsedResult.isProduce);
-    const isSuitable = Boolean(parsedResult.isSuitable);
-    const cropIdentified = String(parsedResult.cropIdentified || crop).trim();
-    const confidence = typeof parsedResult.confidence === 'number'
-      ? Math.max(0, Math.min(1, parseFloat(parsedResult.confidence.toFixed(2))))
-      : 0.5;
-
-    const observations = Array.isArray(parsedResult.observations) && parsedResult.observations.length > 0
-      ? parsedResult.observations.map((o) => String(o).trim())
-      : ['Visual inspection completed'];
-
-    // Handle Unsuitable / Non-Produce image gracefully
-    if (!isProduce || !isSuitable || parsedResult.qualityScore === null || parsedResult.qualityScore === undefined) {
+    // 5. Handle Unsuitable / Non-Produce image gracefully
+    if (!parsedResult.isProduce || !parsedResult.isSuitable || parsedResult.qualityScore === null) {
       return res.json({
         success: true,
         status: 'UNSUITABLE',
         crop,
-        cropIdentified: 'unknown',
+        cropIdentified: parsedResult.cropIdentified || 'unknown',
         isProduce: false,
         isSuitable: false,
         message: 'The uploaded photo does not appear to match the selected crop or is too blurry to evaluate reliably.',
         qualityScore: null,
         grade: null,
-        confidence,
-        observations,
+        confidence: parsedResult.confidence,
+        observations: parsedResult.observations,
         model: usedModel,
         assessedAt: new Date().toISOString(),
       });
     }
 
-    // Valid quality score clamping (0 to 100) and defect severity calibration
-    const rawScore = parseInt(parsedResult.qualityScore, 10);
-    const defectSeverity = String(parsedResult.defectSeverity || '').trim();
-    const qualityScore = calibrateProduceQualityScore(rawScore, defectSeverity);
-
-    // 6. Application DETERMINISTIC Grading (Thresholds: A >= 90, B >= 75, C < 75)
+    // 6. Calibrate produce quality score and deterministic grading
+    const qualityScore = calibrateProduceQualityScore(parsedResult.qualityScore, parsedResult.defectSeverity);
     const finalGrade = calculateDeterministicGrade(qualityScore);
 
     return res.json({
       success: true,
       status: 'ASSESSED',
       crop,
-      cropIdentified,
+      cropIdentified: parsedResult.cropIdentified,
       isProduce: true,
       isSuitable: true,
       qualityScore,
       grade: finalGrade,
-      confidence,
-      observations,
+      confidence: parsedResult.confidence,
+      observations: parsedResult.observations,
       model: usedModel,
       assessedAt: new Date().toISOString(),
     });
@@ -1053,7 +1308,7 @@ CRITICAL RULES:
   }
 });
 
-export { app, calculateDeterministicGrade, invokeGroqWithRetry, calibrateProduceQualityScore };
+export { app, calculateDeterministicGrade, invokeGroqWithRetry, calibrateProduceQualityScore, parseAndValidateAssessment };
 export default app;
 
 if (process.env.NODE_ENV !== 'test') {
