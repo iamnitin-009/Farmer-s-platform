@@ -325,7 +325,10 @@ export default function FarmerPortal({ onNavigate, session, onLogout }) {
 
       if (!res.ok || !data.success) {
         setQualityStatus('error')
-        setQualityError(data.error || 'Failed to analyze produce quality.')
+        const errMsg = (data.code === 'GROQ_JSON_VALIDATION_FAILED' && lang === 'hi')
+          ? 'AI गुणवत्ता निरीक्षण मॉडल समय पर पूर्ण नहीं हो सका। कृपया पुनः प्रयास करें।'
+          : (data.error || 'Failed to analyze produce quality.')
+        setQualityError(errMsg)
         return
       }
 

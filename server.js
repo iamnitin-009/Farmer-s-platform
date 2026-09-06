@@ -33,6 +33,7 @@ const GROQ_VISION_MODEL_ID = process.env.GROQ_VISION_MODEL_ID || 'qwen/qwen3.6-2
 app.use(express.json({ limit: '15mb' }));
 
 const SUPPORTED_CROPS = ['wheat', 'rice', 'potato', 'onion', 'tomato', 'fruits'];
+const SUPPORTED_FRUITS = ['apple', 'mango', 'banana', 'orange', 'grapes', 'guava', 'papaya'];
 
 // Deterministic grading thresholds
 const GRADE_A_MIN = 90;
@@ -410,8 +411,8 @@ function calibrateProduceQualityScore(rawScore, defectSeverity) {
   return score;
 }
 
-// // Exponential backoff retry handler for transient Groq 429/rate-limit errors
-// Retries maximum 3 times with delays of approximately 1s, 2s, and 4s.
+// Exponential backoff retry handler for transient Groq errors
+// Retries rate-limit (429), intermittent json_validate_failed (400), and transient gateway errors (500/502/503).
 // Never retries 401 invalid API key errors.
 async function invokeGroqWithRetry(fn, maxRetries = 3) {
   const delays = [1000, 2000, 4000];
@@ -423,6 +424,7 @@ async function invokeGroqWithRetry(fn, maxRetries = 3) {
       // Do not retry invalid API key errors (401)
       const isAuthError =
         err.status === 401 ||
+        err.statusCode === 401 ||
         err.message?.includes('invalid_api_key') ||
         err.message?.includes('API key') ||
         err.code === 'invalid_api_key';
@@ -431,24 +433,50 @@ async function invokeGroqWithRetry(fn, maxRetries = 3) {
         throw err;
       }
 
+      // Check if error is transient JSON validation failure from Groq reasoning models
+      const isJsonValidateFailed =
+        (err.status === 400 || err.statusCode === 400) &&
+        (err.code === 'json_validate_failed' ||
+         err.message?.includes('json_validate_failed') ||
+         err.message?.includes('max completion tokens') ||
+         err.message?.includes('Failed to validate JSON'));
+
       // Check if error is transient 429 rate limit
       const isRateLimit =
         err.status === 429 ||
+        err.statusCode === 429 ||
         err.message?.includes('rate_limit') ||
         err.message?.includes('429') ||
         err.code === 'rate_limit_exceeded';
 
-      if (isRateLimit && attempt < maxRetries) {
+      // Check if transient server/network error (500, 502, 503)
+      const isTransientServer =
+        err.status === 500 ||
+        err.status === 502 ||
+        err.status === 503 ||
+        err.statusCode === 500 ||
+        err.statusCode === 502 ||
+        err.statusCode === 503;
+
+      const shouldRetry = (isRateLimit || isJsonValidateFailed || isTransientServer) && attempt < maxRetries;
+
+      if (shouldRetry) {
         const delayMs = process.env.TEST_FAST_RETRY ? 50 : (delays[attempt] || Math.pow(2, attempt) * 1000);
         const delayLabel = process.env.TEST_FAST_RETRY ? `${delayMs}ms` : `~${Math.round(delayMs / 1000)}s`;
+        const reason = isJsonValidateFailed
+          ? 'JSON validation token limit hit (json_validate_failed)'
+          : isRateLimit
+          ? 'Rate limit encountered (429)'
+          : `Transient server error (${err.status || err.statusCode})`;
+
         console.warn(
-          `[Groq AI] Rate limit encountered (429). Retrying attempt ${attempt + 1}/${maxRetries} after ${delayLabel} backoff...`
+          `[Groq AI] ${reason}. Retrying attempt ${attempt + 1}/${maxRetries} after ${delayLabel} backoff...`
         );
         await new Promise((resolve) => setTimeout(resolve, delayMs));
         continue;
       }
 
-      // Re-throw if exhausted retries or not a rate-limit error
+      // Re-throw if exhausted retries or not a retryable error
       throw err;
     }
   }
@@ -801,10 +829,12 @@ app.post('/api/quality-check', async (req, res) => {
     const { crop, image, mimeType } = req.body;
 
     // 1. Validation of crop parameter
-    if (!crop || !SUPPORTED_CROPS.includes(crop.toLowerCase())) {
+    const cropLower = (crop || '').toLowerCase().trim();
+    const isSupportedCrop = cropLower && (SUPPORTED_CROPS.includes(cropLower) || SUPPORTED_FRUITS.includes(cropLower));
+    if (!isSupportedCrop) {
       return res.status(400).json({
         success: false,
-        error: `Invalid or unsupported crop. Must be one of: ${SUPPORTED_CROPS.join(', ')}`,
+        error: `Invalid or unsupported crop. Must be one of: ${SUPPORTED_CROPS.join(', ')} (or specific fruits like ${SUPPORTED_FRUITS.join(', ')})`,
         code: 'UNSUPPORTED_CROP',
       });
     }
@@ -959,7 +989,7 @@ GRADE SCORING REFERENCE:
             },
             reasoning_format: 'hidden',
             temperature: 0.1,
-            max_tokens: 1000,
+            max_completion_tokens: 3500,
           })
         );
         usedModel = modelToTry;
@@ -1087,6 +1117,22 @@ GRADE SCORING REFERENCE:
         success: false,
         error: 'The requested Groq Vision model is currently unavailable or decommissioned. Please check GROQ_VISION_MODEL_ID.',
         code: 'GROQ_MODEL_NOT_FOUND',
+        details: err.message,
+      });
+    }
+
+    // JSON Validation / Generation Failure (400 from Groq reasoning model)
+    const isJsonValidateFailed =
+      err.code === 'json_validate_failed' ||
+      err.message?.includes('json_validate_failed') ||
+      err.message?.includes('max completion tokens') ||
+      err.message?.includes('Failed to validate JSON');
+
+    if (isJsonValidateFailed) {
+      return res.status(502).json({
+        success: false,
+        error: 'AI quality assessment model reached token limit during generation. Please try again.',
+        code: 'GROQ_JSON_VALIDATION_FAILED',
         details: err.message,
       });
     }
