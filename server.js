@@ -29,8 +29,8 @@ const GROQ_MODEL_ID =
     : 'openai/gpt-oss-20b';
 const GROQ_VISION_MODEL_ID = process.env.GROQ_VISION_MODEL_ID || 'qwen/qwen3.6-27b';
 
-// Limit JSON body payload size (supports base64 image up to 8MB)
-app.use(express.json({ limit: '10mb' }));
+// Limit JSON body payload size (supports base64 image up to 8MB decoded / ~11MB base64)
+app.use(express.json({ limit: '15mb' }));
 
 const SUPPORTED_CROPS = ['wheat', 'rice', 'potato', 'onion', 'tomato', 'fruits'];
 
@@ -454,63 +454,108 @@ async function invokeGroqWithRetry(fn, maxRetries = 3) {
   }
 }
 
+// Validates and normalizes produce inspection images into standard data URLs for Groq Vision
+function sanitizeAndValidateProduceImage(image, mimeType) {
+  if (!image || typeof image !== 'string') {
+    return {
+      valid: false,
+      status: 400,
+      code: 'MISSING_IMAGE_PAYLOAD',
+      error: 'Missing image payload.',
+    };
+  }
+
+  const trimmed = image.trim();
+  let mime = 'image/jpeg';
+  let base64 = '';
+
+  if (trimmed.startsWith('data:')) {
+    // Matches data:image/...;base64, handling any parameters
+    const headerMatch = trimmed.match(/^data:(image\/[a-zA-Z0-9+.-]+)(?:;[a-zA-Z0-9=._-]+)*;base64,/i);
+    if (!headerMatch) {
+      return {
+        valid: false,
+        status: 400,
+        code: 'INVALID_IMAGE_DATA_URL',
+        error: 'Invalid image data URL format. Expected data:image/<type>;base64,<data>',
+      };
+    }
+    const detectedMime = headerMatch[1].toLowerCase();
+    mime = detectedMime === 'image/jpg' ? 'image/jpeg' : detectedMime;
+    // Extract base64 and strip all internal whitespaces/newlines
+    base64 = trimmed.slice(headerMatch[0].length).replace(/\s+/g, '');
+  } else {
+    // Raw base64 string provided without data: prefix
+    base64 = trimmed.replace(/\s+/g, '');
+    if (mimeType && typeof mimeType === 'string') {
+      const cleanMime = mimeType.trim().toLowerCase();
+      mime = cleanMime === 'image/jpg' ? 'image/jpeg' : (cleanMime.startsWith('image/') ? cleanMime : `image/${cleanMime}`);
+    }
+  }
+
+  const supportedMimes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
+  if (!supportedMimes.includes(mime)) {
+    return {
+      valid: false,
+      status: 400,
+      code: 'UNSUPPORTED_IMAGE_FORMAT',
+      error: `Unsupported image format (${mime}). Allowed formats: JPEG, PNG, WEBP, GIF.`,
+    };
+  }
+
+  if (!base64 || base64.length === 0) {
+    return {
+      valid: false,
+      status: 400,
+      code: 'EMPTY_IMAGE_BUFFER',
+      error: 'Empty image buffer.',
+    };
+  }
+
+  // Calculate estimated decoded bytes: base64 length * 3 / 4
+  const estimatedBytes = Math.round((base64.length * 3) / 4);
+  const MAX_IMAGE_BYTES = 8 * 1024 * 1024; // 8MB limit
+  if (estimatedBytes > MAX_IMAGE_BYTES) {
+    return {
+      valid: false,
+      status: 400,
+      code: 'IMAGE_TOO_LARGE',
+      error: `Image size (${(estimatedBytes / (1024 * 1024)).toFixed(1)}MB) exceeds maximum limit of 8MB.`,
+    };
+  }
+
+  // Guarantee clean data URL with intact MIME prefix
+  const dataUrl = `data:${mime};base64,${base64}`;
+
+  return {
+    valid: true,
+    dataUrl,
+    mime,
+    sizeBytes: estimatedBytes,
+  };
+}
+
 // Quality check endpoint (Powered by Groq Vision)
 app.post('/api/quality-check', async (req, res) => {
   try {
     const { crop, image, mimeType } = req.body;
 
-    // 1. Validation of input parameters
+    // 1. Validation of crop parameter
     if (!crop || !SUPPORTED_CROPS.includes(crop.toLowerCase())) {
       return res.status(400).json({
         success: false,
         error: `Invalid or unsupported crop. Must be one of: ${SUPPORTED_CROPS.join(', ')}`,
+        code: 'UNSUPPORTED_CROP',
       });
     }
 
-    if (!image || typeof image !== 'string') {
-      return res.status(400).json({
+    // 2. Sanitize and validate image payload
+    const imageResult = sanitizeAndValidateProduceImage(image, mimeType);
+    if (!imageResult.valid) {
+      return res.status(imageResult.status).json({
         success: false,
-        error: 'Missing image payload.',
-      });
-    }
-
-    // 2. Extract base64 and format
-    let base64Data = '';
-    let format = 'jpeg';
-
-    if (image.startsWith('data:')) {
-      const matches = image.match(/^data:image\/([a-zA-Z0-9+]+);base64,(.+)$/);
-      if (!matches || matches.length < 3) {
-        return res.status(400).json({
-          success: false,
-          error: 'Invalid image data URL format.',
-        });
-      }
-      let rawFormat = matches[1].toLowerCase();
-      if (rawFormat === 'jpg') rawFormat = 'jpeg';
-      if (!['jpeg', 'png', 'webp', 'gif'].includes(rawFormat)) {
-        return res.status(400).json({
-          success: false,
-          error: 'Unsupported image format. Allowed: JPEG, PNG, WEBP, GIF.',
-        });
-      }
-      format = rawFormat;
-      base64Data = matches[2];
-    } else {
-      base64Data = image;
-      if (mimeType) {
-        let rawFormat = mimeType.replace('image/', '').toLowerCase();
-        if (rawFormat === 'jpg') rawFormat = 'jpeg';
-        if (['jpeg', 'png', 'webp', 'gif'].includes(rawFormat)) {
-          format = rawFormat;
-        }
-      }
-    }
-
-    if (!base64Data || base64Data.trim().length === 0) {
-      return res.status(400).json({
-        success: false,
-        error: 'Empty image buffer.',
+        error: imageResult.error,
+        code: imageResult.code,
       });
     }
 
@@ -613,7 +658,6 @@ For non-produce or unsuitable images:
       'qwen/qwen3.8-27b',
     ].filter((m, i, arr) => m && arr.indexOf(m) === i);
 
-    const imageUrl = `data:image/${format};base64,${base64Data}`;
     let chatCompletion = null;
     let usedModel = GROQ_VISION_MODEL_ID;
 
@@ -632,15 +676,14 @@ For non-produce or unsuitable images:
                   {
                     type: 'image_url',
                     image_url: {
-                      url: imageUrl,
+                      url: imageResult.dataUrl,
                     },
                   },
                 ],
               },
             ],
             temperature: 0.1,
-            max_tokens: 800,
-            response_format: { type: 'json_object' },
+            max_tokens: 1000,
           })
         );
         usedModel = modelToTry;
@@ -666,19 +709,26 @@ For non-produce or unsuitable images:
     const rawText = chatCompletion?.choices?.[0]?.message?.content || '';
     console.log('[Groq Vision] Raw response received.');
 
-    // 4. Safely extract and parse JSON
+    // 4. Safely extract and parse JSON from model output
     let parsedResult = null;
     try {
-      const cleanedText = rawText
-        .replace(/^\s*```(?:json)?/i, '')
-        .replace(/```\s*$/, '')
+      // Strip reasoning/think tokens if emitted by Qwen or reasoning models
+      const sanitized = rawText.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+      // Strip markdown code fences if present
+      const withoutFences = sanitized
+        .replace(/^```(?:json)?\s*/i, '')
+        .replace(/\s*```$/i, '')
         .trim();
-      parsedResult = JSON.parse(cleanedText);
+      // Find outermost JSON object
+      const jsonMatch = withoutFences.match(/\{[\s\S]*\}/);
+      const jsonStr = jsonMatch ? jsonMatch[0] : withoutFences;
+      parsedResult = JSON.parse(jsonStr);
     } catch (parseErr) {
       console.error('[Groq Vision] Failed to parse model JSON output:', parseErr.message, rawText);
       return res.status(502).json({
         success: false,
         error: 'Model returned malformed assessment output.',
+        code: 'MALFORMED_MODEL_OUTPUT',
         rawText: rawText.slice(0, 300),
       });
     }
@@ -742,9 +792,10 @@ For non-produce or unsuitable images:
     // Authentication Error (Invalid API Key)
     if (
       err.status === 401 ||
+      err.statusCode === 401 ||
+      err.code === 'invalid_api_key' ||
       err.message?.includes('invalid_api_key') ||
-      err.message?.includes('API key') ||
-      err.code === 'invalid_api_key'
+      err.message?.includes('API key')
     ) {
       return res.status(401).json({
         success: false,
@@ -756,9 +807,10 @@ For non-produce or unsuitable images:
     // Rate Limit / Quota Error (429)
     if (
       err.status === 429 ||
+      err.statusCode === 429 ||
+      err.code === 'rate_limit_exceeded' ||
       err.message?.includes('rate_limit') ||
-      err.message?.includes('429') ||
-      err.code === 'rate_limit_exceeded'
+      err.message?.includes('429')
     ) {
       return res.status(429).json({
         success: false,
@@ -770,6 +822,7 @@ For non-produce or unsuitable images:
     // Model Not Found / Decommissioned Error (404)
     if (
       err.status === 404 ||
+      err.statusCode === 404 ||
       err.code === 'model_not_found' ||
       err.message?.includes('model_not_found') ||
       err.message?.includes('does not exist') ||
@@ -783,18 +836,43 @@ For non-produce or unsuitable images:
       });
     }
 
-    // Service Unavailable / 503
-    if (err.status === 503) {
-      return res.status(503).json({
+    // Bad Request / Invalid Image Payload (400)
+    if (
+      err.status === 400 ||
+      err.statusCode === 400 ||
+      err.name === 'BadRequestError' ||
+      err.message?.includes('400')
+    ) {
+      return res.status(400).json({
         success: false,
-        error: 'Groq service is temporarily unavailable. Please try again in a moment.',
-        code: 'GROQ_SERVICE_UNAVAILABLE',
+        error: 'Groq Vision rejected the request or image payload. Please ensure the photo is a valid JPEG/PNG image.',
+        code: 'GROQ_BAD_REQUEST',
+        details: err.message,
       });
     }
 
+    // Service Unavailable / Gateway Error (500 / 502 / 503 / 504 from Groq)
+    if (
+      err.status === 503 ||
+      err.status === 502 ||
+      err.status === 504 ||
+      err.status === 500 ||
+      err.name === 'InternalServerError' ||
+      err.name === 'APIConnectionError'
+    ) {
+      return res.status(503).json({
+        success: false,
+        error: 'Groq AI service is temporarily unavailable. Please try again in a moment.',
+        code: 'GROQ_SERVICE_UNAVAILABLE',
+        details: err.message,
+      });
+    }
+
+    // Fallback Internal Error
     return res.status(500).json({
       success: false,
       error: 'An internal error occurred during produce quality assessment.',
+      code: 'INTERNAL_ASSESSMENT_ERROR',
       details: err.message,
     });
   }
