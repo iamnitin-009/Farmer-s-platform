@@ -280,7 +280,7 @@ useEffect(() => {
           </div>
 
           <div className="voice-header-actions">
-            <span className="voice-gemini-pill">{va.badge || 'Gemini 3.7 Flash'}</span>
+            <span className="voice-gemini-pill">{va.badge || 'Powered by Groq'}</span>
             <div className="voice-lang-switcher">
               <button
                 type="button"
@@ -353,7 +353,7 @@ useEffect(() => {
                 ✨
               </div>
               <span className="voice-stage-label text-thinking">
-                {va.thinking || 'Gemini is analyzing your question...'}
+                {va.thinking || 'AI is analyzing your question...'}
               </span>
             </div>
           ) : status === 'SPEAKING' ? (
@@ -428,7 +428,7 @@ useEffect(() => {
             onClick={() => handleQuery(transcript)}
             disabled={!transcript.trim() || status === 'THINKING'}
           >
-            {va.askBtn || 'Ask Gemini'}
+            {va.askBtn || 'Ask AI'}
           </button>
         </div>
 
@@ -458,7 +458,7 @@ useEffect(() => {
         {answer && (
           <div className="voice-answer-container">
             <div className="voice-answer-header">
-              <span className="voice-answer-tag">🤖 Gemini 3.7 Flash Response:</span>
+              <span className="voice-answer-tag">🤖 Groq AI Response:</span>
               <div className="voice-answer-actions">
                 <button
                   type="button"

@@ -19,21 +19,25 @@ const serverSrc = fs.readFileSync('server.js', 'utf8');
 assert(serverSrc.includes("import Groq from 'groq-sdk'"), 'Must import groq-sdk');
 assert(serverSrc.includes('GROQ_API_KEY'), 'Must check process.env.GROQ_API_KEY');
 assert(serverSrc.includes('GROQ_MODEL_ID'), 'Must configure GROQ_MODEL_ID');
+assert(serverSrc.includes('openai/gpt-oss-20b'), 'Must default to supported Groq production model');
 assert(serverSrc.includes('GROQ_RATE_LIMITED'), 'Must handle 429 rate limits with GROQ_RATE_LIMITED');
 assert(serverSrc.includes('GROQ_API_KEY_INVALID'), 'Must handle 401 with GROQ_API_KEY_INVALID');
+assert(serverSrc.includes('GROQ_MODEL_NOT_FOUND'), 'Must handle 404 with GROQ_MODEL_NOT_FOUND');
 
 // Ensure Quality Check remains on Gemini
 assert(serverSrc.includes("import { GoogleGenAI } from '@google/genai'"), 'Must retain GoogleGenAI for quality check');
 assert(serverSrc.includes('GEMINI_API_KEY'), 'Must retain GEMINI_API_KEY for quality check');
 assert(serverSrc.includes("app.post('/api/quality-check'"), 'Must preserve /api/quality-check');
 
-// Ensure frontend has zero key leaks
+// Ensure frontend has zero key leaks and accurate branding
 const vaSrc = fs.readFileSync('src/components/VoiceAssistant.jsx', 'utf8');
 assert(!vaSrc.includes('GROQ_API_KEY'), 'Frontend must never reference GROQ_API_KEY');
 assert(!vaSrc.includes('GEMINI_API_KEY'), 'Frontend must never reference GEMINI_API_KEY');
 assert(!vaSrc.includes('gsk_'), 'Frontend must never contain Groq key literals');
 assert(!vaSrc.includes('AIzaSy'), 'Frontend must never contain Gemini key literals');
-console.log('   ✓ Zero key leakage verified. Server correctly isolates Gemini for Quality and Groq for Voice.');
+assert(!vaSrc.includes('Gemini 3.7 Flash'), 'VoiceAssistant must not display Gemini 3.7 Flash badge');
+assert(vaSrc.includes('Powered by Groq') || vaSrc.includes('Groq'), 'VoiceAssistant must display accurate Groq/AI badge');
+console.log('   ✓ Zero key leakage verified. Groq production model and accurate Groq badge confirmed.');
 
 // 2. Start test server
 console.log('\n2. Testing /api/voice-assistant Endpoint Responses...');

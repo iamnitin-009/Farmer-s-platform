@@ -16,7 +16,12 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 5001;
 const GEMINI_MODEL_ID = process.env.GEMINI_MODEL_ID || 'gemini-3.7-flash';
-const GROQ_MODEL_ID = process.env.GROQ_MODEL_ID || 'llama-3.3-70b-versatile';
+const GROQ_MODEL_ID =
+  process.env.GROQ_MODEL_ID &&
+  process.env.GROQ_MODEL_ID !== 'llama-3.3-70b-versatile' &&
+  process.env.GROQ_MODEL_ID !== 'llama-3.1-8b-instant'
+    ? process.env.GROQ_MODEL_ID
+    : 'openai/gpt-oss-20b';
 
 // Limit JSON body payload size (supports base64 image up to 8MB)
 app.use(express.json({ limit: '10mb' }));
@@ -612,28 +617,59 @@ CRITICAL RULES:
       ? `${contextSnippet}\n\nUser Question: ${message.trim()}`
       : message.trim();
 
-    console.log(`[Groq Voice Assistant] Invoking ${GROQ_MODEL_ID} for query: "${message.slice(0, 50)}"...`);
-
     // Call Groq completions with exponential backoff retry for transient 429 errors
-    const chatCompletion = await invokeGroqWithRetry(() =>
-      groq.chat.completions.create({
-        messages: [
-          { role: 'system', content: systemInstruction },
-          { role: 'user', content: userPrompt },
-        ],
-        model: GROQ_MODEL_ID,
-        temperature: 0.3,
-        max_tokens: 600,
-      })
-    );
+    // and automatic fallback if the configured model is unavailable/decommissioned (404 model_not_found)
+    const candidateModels = [
+      GROQ_MODEL_ID,
+      'openai/gpt-oss-20b',
+      'openai/gpt-oss-120b',
+    ].filter((m, i, arr) => m && arr.indexOf(m) === i);
 
-    const answer = chatCompletion.choices?.[0]?.message?.content?.trim() || 'I could not generate an answer at this time. Please try again.';
+    let chatCompletion = null;
+    let usedModel = GROQ_MODEL_ID;
+
+    for (let i = 0; i < candidateModels.length; i++) {
+      const modelToTry = candidateModels[i];
+      try {
+        console.log(`[Groq Voice Assistant] Invoking ${modelToTry} for query: "${message.slice(0, 50)}"...`);
+        chatCompletion = await invokeGroqWithRetry(() =>
+          groq.chat.completions.create({
+            messages: [
+              { role: 'system', content: systemInstruction },
+              { role: 'user', content: userPrompt },
+            ],
+            model: modelToTry,
+            temperature: 0.3,
+            max_tokens: 600,
+          })
+        );
+        usedModel = modelToTry;
+        break;
+      } catch (callErr) {
+        const isModelNotFoundError =
+          callErr.status === 404 ||
+          callErr.code === 'model_not_found' ||
+          callErr.message?.includes('model_not_found') ||
+          callErr.message?.includes('does not exist') ||
+          callErr.message?.includes('decommissioned');
+
+        if (isModelNotFoundError && i < candidateModels.length - 1) {
+          console.warn(
+            `[Groq Voice Assistant] Model ${modelToTry} unavailable (${callErr.message}). Falling back to ${candidateModels[i + 1]}...`
+          );
+          continue;
+        }
+        throw callErr;
+      }
+    }
+
+    const answer = chatCompletion?.choices?.[0]?.message?.content?.trim() || 'I could not generate an answer at this time. Please try again.';
     console.log('[Groq Voice Assistant] Response successfully generated.');
 
     return res.json({
       success: true,
       answer,
-      model: GROQ_MODEL_ID,
+      model: usedModel,
     });
   } catch (err) {
     console.error('[Error] /api/voice-assistant failure:', err.name, err.message);
@@ -663,6 +699,22 @@ CRITICAL RULES:
         success: false,
         error: 'Groq rate limit exceeded. Please wait a moment before trying again.',
         code: 'GROQ_RATE_LIMITED',
+      });
+    }
+
+    // Model Not Found / Decommissioned Error (404)
+    if (
+      err.status === 404 ||
+      err.code === 'model_not_found' ||
+      err.message?.includes('model_not_found') ||
+      err.message?.includes('does not exist') ||
+      err.message?.includes('decommissioned')
+    ) {
+      return res.status(404).json({
+        success: false,
+        error: 'The requested Groq model is currently unavailable or decommissioned. Please check GROQ_MODEL_ID.',
+        code: 'GROQ_MODEL_NOT_FOUND',
+        details: err.message,
       });
     }
 
