@@ -4,6 +4,7 @@
 import express from 'express';
 import dotenv from 'dotenv';
 import { GoogleGenAI } from '@google/genai';
+import Groq from 'groq-sdk';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { listingStore } from './server/listingStore.js';
@@ -15,6 +16,7 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 5001;
 const GEMINI_MODEL_ID = process.env.GEMINI_MODEL_ID || 'gemini-3.7-flash';
+const GROQ_MODEL_ID = process.env.GROQ_MODEL_ID || 'llama-3.3-70b-versatile';
 
 // Limit JSON body payload size (supports base64 image up to 8MB)
 app.use(express.json({ limit: '10mb' }));
@@ -509,7 +511,51 @@ If unsuitable or not produce:
   }
 });
 
-// AI Voice Assistant Endpoint
+// Exponential backoff retry handler for transient Groq 429/rate-limit errors
+// Retries maximum 3 times with delays of approximately 1s, 2s, and 4s.
+// Never retries 401 invalid API key errors.
+async function invokeGroqWithRetry(fn, maxRetries = 3) {
+  const delays = [1000, 2000, 4000];
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      // Do not retry invalid API key errors (401)
+      const isAuthError =
+        err.status === 401 ||
+        err.message?.includes('invalid_api_key') ||
+        err.message?.includes('API key') ||
+        err.code === 'invalid_api_key';
+
+      if (isAuthError) {
+        throw err;
+      }
+
+      // Check if error is transient 429 rate limit
+      const isRateLimit =
+        err.status === 429 ||
+        err.message?.includes('rate_limit') ||
+        err.message?.includes('429') ||
+        err.code === 'rate_limit_exceeded';
+
+      if (isRateLimit && attempt < maxRetries) {
+        const delayMs = process.env.TEST_FAST_RETRY ? 50 : (delays[attempt] || Math.pow(2, attempt) * 1000);
+        const delayLabel = process.env.TEST_FAST_RETRY ? `${delayMs}ms` : `~${Math.round(delayMs / 1000)}s`;
+        console.warn(
+          `[Groq Voice Assistant] Rate limit encountered (429). Retrying attempt ${attempt + 1}/${maxRetries} after ${delayLabel} backoff...`
+        );
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        continue;
+      }
+
+      // Re-throw if exhausted retries or not a rate-limit error
+      throw err;
+    }
+  }
+}
+
+// AI Voice Assistant Endpoint (Powered by Groq)
 app.post('/api/voice-assistant', async (req, res) => {
   try {
     const { message, language = 'en', context } = req.body;
@@ -522,19 +568,19 @@ app.post('/api/voice-assistant', async (req, res) => {
       });
     }
 
-    // 2. Check Gemini API key configuration
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey || apiKey === 'your_gemini_api_key_here' || apiKey.trim() === '') {
+    // 2. Check Groq API key configuration
+    const apiKey = process.env.GROQ_API_KEY;
+    if (!apiKey || apiKey === 'your_groq_api_key_here' || apiKey.trim() === '') {
       return res.status(503).json({
         success: false,
         unconfigured: true,
-        error: 'Google Gemini API key not configured. Please set GEMINI_API_KEY in your server .env file.',
-        code: 'GEMINI_API_KEY_MISSING',
+        error: 'Groq API key not configured. Please set GROQ_API_KEY in your server environment.',
+        code: 'GROQ_API_KEY_MISSING',
       });
     }
 
-    // 3. Initialize GoogleGenAI client
-    const ai = new GoogleGenAI({ apiKey });
+    // 3. Initialize Groq client
+    const groq = new Groq({ apiKey });
 
     // 4. Build prompt with system instructions and user context
     const langNote = (language === 'hi' || /[\u0900-\u097F]/.test(message))
@@ -546,7 +592,7 @@ app.post('/api/voice-assistant', async (req, res) => {
       contextSnippet = '\nAPPLICATION CONTEXT:\n' + JSON.stringify(context, null, 2);
     }
 
-    const systemInstruction = `You are an agricultural marketplace assistant for an Indian farmer marketplace.
+    const systemInstruction = `You are an agricultural marketplace assistant for an Indian farmer marketplace named PRAGATI.
 Give concise, practical answers (usually 2 to 4 sentences or bullet points) suitable for text-to-speech.
 ${langNote}
 Never invent live market prices, government schemes, weather data, or market data.
@@ -562,51 +608,70 @@ CRITICAL RULES:
 5. Logistics: Routes from hub to buyers are optimized using nearest-neighbor sequence.
 6. Selling & Buying: Farmers can list produce with photos and get AI quality + fair price. Buyers can browse marketplace and place orders directly.`;
 
-    console.log(`[Gemini Voice Assistant] Invoking ${GEMINI_MODEL_ID} for query: "${message.slice(0, 50)}"...`);
+    const userPrompt = contextSnippet
+      ? `${contextSnippet}\n\nUser Question: ${message.trim()}`
+      : message.trim();
 
-    const contents = [
-      systemInstruction,
-      contextSnippet,
-      `User Question: ${message.trim()}`,
-    ].filter(Boolean);
+    console.log(`[Groq Voice Assistant] Invoking ${GROQ_MODEL_ID} for query: "${message.slice(0, 50)}"...`);
 
-    const response = await ai.models.generateContent({
-      model: GEMINI_MODEL_ID,
-      contents,
-      config: {
+    // Call Groq completions with exponential backoff retry for transient 429 errors
+    const chatCompletion = await invokeGroqWithRetry(() =>
+      groq.chat.completions.create({
+        messages: [
+          { role: 'system', content: systemInstruction },
+          { role: 'user', content: userPrompt },
+        ],
+        model: GROQ_MODEL_ID,
         temperature: 0.3,
-        maxOutputTokens: 600,
-      },
-    });
+        max_tokens: 600,
+      })
+    );
 
-    const answer = response?.text?.trim() || 'I could not generate an answer at this time. Please try again.';
-    console.log('[Gemini Voice Assistant] Response successfully generated.');
+    const answer = chatCompletion.choices?.[0]?.message?.content?.trim() || 'I could not generate an answer at this time. Please try again.';
+    console.log('[Groq Voice Assistant] Response successfully generated.');
 
     return res.json({
       success: true,
       answer,
-      model: GEMINI_MODEL_ID,
+      model: GROQ_MODEL_ID,
     });
   } catch (err) {
     console.error('[Error] /api/voice-assistant failure:', err.name, err.message);
 
+    // Authentication Error (Invalid API Key)
     if (
-      err.message?.includes('API_KEY_INVALID') ||
-      err.message?.includes('API key not valid') ||
-      (err.status === 400 && err.message?.includes('key'))
+      err.status === 401 ||
+      err.message?.includes('invalid_api_key') ||
+      err.message?.includes('API key') ||
+      err.code === 'invalid_api_key'
     ) {
       return res.status(401).json({
         success: false,
-        error: 'Google Gemini API key is invalid. Please check GEMINI_API_KEY in your server .env file.',
-        code: 'GEMINI_API_KEY_INVALID',
+        error: 'Groq API key is invalid. Please check GROQ_API_KEY in your server environment.',
+        code: 'GROQ_API_KEY_INVALID',
       });
     }
 
-    if (err.status === 429 || err.message?.includes('RESOURCE_EXHAUSTED') || err.message?.includes('quota')) {
+    // Rate Limit / Quota Error (429)
+    if (
+      err.status === 429 ||
+      err.message?.includes('rate_limit') ||
+      err.message?.includes('429') ||
+      err.code === 'rate_limit_exceeded'
+    ) {
       return res.status(429).json({
         success: false,
-        error: 'Google Gemini rate limit / quota exceeded. Please wait a moment before trying again.',
-        code: 'GEMINI_RATE_LIMITED',
+        error: 'Groq rate limit exceeded. Please wait a moment before trying again.',
+        code: 'GROQ_RATE_LIMITED',
+      });
+    }
+
+    // Service Unavailable / 503
+    if (err.status === 503) {
+      return res.status(503).json({
+        success: false,
+        error: 'Groq service is temporarily unavailable. Please try again in a moment.',
+        code: 'GROQ_SERVICE_UNAVAILABLE',
       });
     }
 
@@ -618,7 +683,7 @@ CRITICAL RULES:
   }
 });
 
-export { app, calculateDeterministicGrade };
+export { app, calculateDeterministicGrade, invokeGroqWithRetry };
 export default app;
 
 if (process.env.NODE_ENV !== 'test') {

@@ -240,10 +240,11 @@ async function run() {
     console.log('✓ Mobile 360px viewport has 0 horizontal overflow and clean PRAGATI branding')
 
     console.log('\n🎉 ALL PRAGATI BRANDING & LOGO VERIFICATIONS PASSED 100%!')
+    process.exit(0)
   } finally {
-    ws.close()
-    chrome.kill()
-    preview.kill()
+    try { ws.close() } catch {}
+    try { chrome.kill() } catch {}
+    try { preview.kill() } catch {}
   }
 }
 

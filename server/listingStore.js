@@ -15,157 +15,16 @@ const DATA_FILE = path.join(DATA_DIR, 'listings.json');
 
 const { Pool } = pg;
 
-// Default initial sample listings seeded if storage is empty
-const SEED_LISTINGS = [
-  {
-    id: 'seed_listing_wheat_01',
-    farmerId: 'farmer_ramesh_01',
-    farmerName: 'Ramesh Kumar',
-    farmerMobile: '9876599001',
-    crop: 'wheat',
-    quantity: 120,
-    price: 26,
-    location: 'Nashik, Maharashtra',
-    harvestDate: '2026-03-01',
-    photo: null,
-    quality: {
-      score: 92,
-      grade: 'A',
-      confidence: 0.95,
-      observations: ['Clean golden grain', 'Low moisture content', 'Premium texture'],
-      assessedAt: new Date().toISOString(),
-      model: 'gemini-3.7-flash',
-    },
-    fairPrice: {
-      suggestedPrice: 26,
-      minPrice: 23,
-      maxPrice: 28,
-      grade: 'A',
-      basePrice: 24,
-    },
-    pickupDecision: {
-      method: 'HOME',
-      thresholdKg: 100,
-      quantityKg: 120,
-      reason: 'Volume (120 kg) exceeds 100 kg threshold for wheat. Direct home pickup scheduled.',
-    },
-    status: 'Listed',
-    moderationStatus: 'approved',
-    traceabilityId: 'TRC-WHEAT-NASHIK-9876',
-    createdAt: new Date(Date.now() - 86400000 * 2).toISOString(),
-  },
-  {
-    id: 'seed_listing_tomato_02',
-    farmerId: 'farmer_suresh_02',
-    farmerName: 'Suresh Patil',
-    farmerMobile: '9822334455',
-    crop: 'tomato',
-    quantity: 45,
-    price: 32,
-    location: 'Pune, Maharashtra',
-    harvestDate: '2026-03-04',
-    photo: null,
-    quality: {
-      score: 88,
-      grade: 'B',
-      confidence: 0.91,
-      observations: ['Firm texture', 'Vibrant red color', 'Minor blemishes'],
-      assessedAt: new Date().toISOString(),
-      model: 'gemini-3.7-flash',
-    },
-    fairPrice: {
-      suggestedPrice: 32,
-      minPrice: 28,
-      maxPrice: 36,
-      grade: 'B',
-      basePrice: 30,
-    },
-    pickupDecision: {
-      method: 'HOME',
-      thresholdKg: 30,
-      quantityKg: 45,
-      reason: 'Volume (45 kg) exceeds 30 kg threshold for tomato. Direct farm pickup scheduled.',
-    },
-    status: 'Listed',
-    moderationStatus: 'approved',
-    traceabilityId: 'TRC-TOMATO-PUNE-2233',
-    createdAt: new Date(Date.now() - 86400000).toISOString(),
-  },
-  {
-    id: 'seed_listing_onion_03',
-    farmerId: 'farmer_vijay_03',
-    farmerName: 'Vijay Deshmukh',
-    farmerMobile: '9890112233',
-    crop: 'onion',
-    quantity: 50,
-    price: 28,
-    location: 'Lasalgaon, Maharashtra',
-    harvestDate: '2026-03-02',
-    photo: null,
-    quality: {
-      score: 95,
-      grade: 'A',
-      confidence: 0.96,
-      observations: ['Uniform size', 'Dry outer skin', 'High keeping quality'],
-      assessedAt: new Date().toISOString(),
-      model: 'gemini-3.7-flash',
-    },
-    fairPrice: {
-      suggestedPrice: 28,
-      minPrice: 25,
-      maxPrice: 31,
-      grade: 'A',
-      basePrice: 26,
-    },
-    pickupDecision: {
-      method: 'HUB',
-      thresholdKg: 75,
-      quantityKg: 50,
-      reason: 'Volume (50 kg) is below 75 kg threshold for onion. Hub drop-off required.',
-    },
-    status: 'Listed',
-    moderationStatus: 'approved',
-    traceabilityId: 'TRC-ONION-LASAL-9011',
-    createdAt: new Date(Date.now() - 3600000 * 12).toISOString(),
-  },
-  {
-    id: 'seed_listing_potato_04',
-    farmerId: 'farmer_anita_04',
-    farmerName: 'Anita Sharma',
-    farmerMobile: '9711223344',
-    crop: 'potato',
-    quantity: 110,
-    price: 19,
-    location: 'Indore, Madhya Pradesh',
-    harvestDate: '2026-03-03',
-    photo: null,
-    quality: {
-      score: 91,
-      grade: 'A',
-      confidence: 0.94,
-      observations: ['Clean oval tubers', 'Free of greening', 'Excellent size'],
-      assessedAt: new Date().toISOString(),
-      model: 'gemini-3.7-flash',
-    },
-    fairPrice: {
-      suggestedPrice: 19,
-      minPrice: 16,
-      maxPrice: 22,
-      grade: 'A',
-      basePrice: 18,
-    },
-    pickupDecision: {
-      method: 'HOME',
-      thresholdKg: 75,
-      quantityKg: 110,
-      reason: 'Volume (110 kg) exceeds 75 kg threshold for potato. Direct pickup scheduled.',
-    },
-    status: 'Listed',
-    moderationStatus: 'approved',
-    traceabilityId: 'TRC-POTATO-INDORE-1122',
-    createdAt: new Date(Date.now() - 3600000 * 6).toISOString(),
-  },
+// Legacy seed listing IDs targeted for deletion
+const SEED_LISTING_IDS = [
+  'seed_listing_wheat_01',
+  'seed_listing_tomato_02',
+  'seed_listing_onion_03',
+  'seed_listing_potato_04',
 ];
+
+// No dummy seed listings
+const SEED_LISTINGS = [];
 
 class ListingStore {
   constructor() {
@@ -213,13 +72,13 @@ class ListingStore {
             );
           `);
 
-          // Check if table is empty
-          const res = await client.query('SELECT COUNT(*) FROM listings');
-          if (parseInt(res.rows[0].count, 10) === 0) {
-            console.log('[ListingStore] Seeding initial marketplace listings into PostgreSQL...');
-            for (const item of SEED_LISTINGS) {
-              await this.insertPgListing(client, item);
-            }
+          // Purge ONLY the 4 legacy seed listings from PostgreSQL on startup
+          const purgeResult = await client.query(
+            'DELETE FROM listings WHERE id IN ($1, $2, $3, $4)',
+            SEED_LISTING_IDS
+          );
+          if (purgeResult.rowCount > 0) {
+            console.log(`[ListingStore] Purged ${purgeResult.rowCount} legacy seed listing(s) from PostgreSQL.`);
           }
           console.log('[ListingStore] ✅ PostgreSQL listings storage ready & synchronized.');
         } finally {
@@ -249,18 +108,27 @@ class ListingStore {
 
       if (fs.existsSync(DATA_FILE)) {
         const raw = fs.readFileSync(DATA_FILE, 'utf8');
-        this.inMemoryListings = JSON.parse(raw);
-        if (!Array.isArray(this.inMemoryListings) || this.inMemoryListings.length === 0) {
-          this.inMemoryListings = [...SEED_LISTINGS];
+        try {
+          const parsed = JSON.parse(raw);
+          this.inMemoryListings = Array.isArray(parsed) ? parsed : [];
+        } catch {
+          this.inMemoryListings = [];
+        }
+        // Purge legacy seed listings from local storage if present
+        const initialCount = this.inMemoryListings.length;
+        this.inMemoryListings = this.inMemoryListings.filter(
+          (item) => !SEED_LISTING_IDS.includes(item.id)
+        );
+        if (this.inMemoryListings.length !== initialCount) {
           this.saveLocalStore();
         }
       } else {
-        this.inMemoryListings = [...SEED_LISTINGS];
+        this.inMemoryListings = [];
         this.saveLocalStore();
       }
     } catch (err) {
       console.error('[ListingStore] Error reading local data file, initializing in-memory:', err.message);
-      this.inMemoryListings = [...SEED_LISTINGS];
+      this.inMemoryListings = [];
     }
   }
 
@@ -522,12 +390,14 @@ class ListingStore {
   async resetSeedData() {
     await this.init();
     if (this.isPostgres && this.pool) {
-      await this.pool.query('DELETE FROM listings');
-      for (const item of SEED_LISTINGS) {
-        await this.insertPgListing(this.pool, item);
-      }
+      await this.pool.query(
+        'DELETE FROM listings WHERE id IN ($1, $2, $3, $4)',
+        SEED_LISTING_IDS
+      );
     } else {
-      this.inMemoryListings = [...SEED_LISTINGS];
+      this.inMemoryListings = this.inMemoryListings.filter(
+        (item) => !SEED_LISTING_IDS.includes(item.id)
+      );
       this.saveLocalStore();
     }
     return true;
