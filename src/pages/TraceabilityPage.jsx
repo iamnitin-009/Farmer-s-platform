@@ -302,7 +302,7 @@ export default function TraceabilityPage({ traceabilityId, onNavigate, session }
                           </ul>
                         )}
                         <span className="tr-sub-attribution">
-                          🤖 {trT.verifiedByAi || 'Verified by Google Gemini 3.7 Flash'}
+                          🤖 {trT.verifiedByAi || 'Verified by Groq AI'}
                         </span>
                       </>
                     ) : (

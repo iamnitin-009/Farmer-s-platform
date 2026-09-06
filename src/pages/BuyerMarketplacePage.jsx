@@ -989,7 +989,7 @@ export default function BuyerMarketplacePage({ onNavigate, session }) {
                     </div>
                   )}
                   <div style={{ marginTop: '8px', fontSize: '0.74rem', color: 'var(--text-muted)' }}>
-                    {qT.modelAttribution || 'Assessed by Google Gemini Vision'}
+                    {qT.modelAttribution || 'Assessed by Groq AI Vision'}
                   </div>
                 </div>
               ) : (

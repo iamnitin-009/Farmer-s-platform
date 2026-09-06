@@ -397,8 +397,8 @@ export default function AdminDashboardPage({ onNavigate, onLogout }) {
                   <div className="pulse-row">
                     <span className="pulse-indicator online" />
                     <div>
-                      <strong>Google Gemini Multimodal Vision API</strong>
-                      <div className="pulse-detail">Model: gemini-3.7-flash | Status: Operational (Deterministic Grading)</div>
+                      <strong>Groq Vision Multimodal API</strong>
+                      <div className="pulse-detail">Model: qwen/qwen3.6-27b | Status: Operational (Deterministic Grading)</div>
                     </div>
                   </div>
 
@@ -556,7 +556,7 @@ export default function AdminDashboardPage({ onNavigate, onLogout }) {
           <div className="admin-tab-pane">
             <div className="admin-section-header">
               <h2>Listing Management & Moderation ({filteredListings.length} Lots)</h2>
-              <p>Inspect agricultural produce lots, verify Gemini AI quality grading, and moderate marketplace content.</p>
+              <p>Inspect agricultural produce lots, verify Groq AI quality grading, and moderate marketplace content.</p>
             </div>
 
             <div className="admin-controls-row">
@@ -817,14 +817,14 @@ export default function AdminDashboardPage({ onNavigate, onLogout }) {
           <div className="admin-tab-pane">
             <div className="admin-section-header">
               <h2>AI Intelligence & Model Activity</h2>
-              <p>Auditable operational metrics from Google Gemini multimodal inspections and deterministic algorithms.</p>
+              <p>Auditable operational metrics from Groq multimodal inspections and deterministic algorithms.</p>
             </div>
 
             <div className="admin-ai-grid">
               <div className="ai-stat-card">
                 <h3>AI Quality Checks Performed</h3>
                 <span className="ai-big-number">{stats.ai.totalInspections}</span>
-                <p>Produce lots visually analyzed by Google Gemini Multimodal Vision API.</p>
+                <p>Produce lots visually analyzed by Groq Vision Multimodal API.</p>
               </div>
 
               <div className="ai-stat-card">

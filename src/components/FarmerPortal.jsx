@@ -297,7 +297,7 @@ export default function FarmerPortal({ onNavigate, session, onLogout }) {
     }
   }
 
-  // Trigger AI Produce Quality Check via Google Gemini Vision (gemini-3.7-flash)
+  // Trigger AI Produce Quality Check via Groq Vision
   const handleAnalyzeQuality = async () => {
     if (!crop.trim()) {
       setErrors((prev) => ({ ...prev, crop: portalT.validation.cropRequired }))
@@ -1089,7 +1089,7 @@ export default function FarmerPortal({ onNavigate, session, onLogout }) {
                             <div className="ai-spinner"></div>
                             <div>
                               <h4>{qT.analyzingText || 'AI is inspecting produce characteristics...'}</h4>
-                              <p className="ai-subtext">{qT.modelAttribution || 'Assessed by Google Gemini Vision'}</p>
+                              <p className="ai-subtext">{qT.modelAttribution || 'Assessed by Groq AI Vision'}</p>
                             </div>
                           </div>
                         )}
@@ -1139,7 +1139,7 @@ export default function FarmerPortal({ onNavigate, session, onLogout }) {
 
                             <div className="quality-card-footer">
                               <span className="quality-model-tag">
-                                {qT.modelAttribution || 'Assessed by Google Gemini Vision'}
+                                {qT.modelAttribution || 'Assessed by Groq AI Vision'}
                               </span>
                               <button
                                 type="button"

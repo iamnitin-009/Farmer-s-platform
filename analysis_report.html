@@ -526,7 +526,7 @@
           <td><strong>AI Crop Quality Grading</strong></td>
           <td>Referenced in Step 2 of HowItWorks text</td>
           <td><span class="badge badge-danger">Missing</span></td>
-          <td>Camera capture + Gemini Vision multimodal quality score (A/B/C)</td>
+          <td>Camera capture + Groq Vision multimodal quality score (A/B/C)</td>
         </tr>
         <tr>
           <td><strong>AI Fair Price Recommendation</strong></td>
@@ -598,7 +598,7 @@
     </div>
 
     <div class="callout callout-info">
-      <strong>Risk 5: AI Workload Placement (Client vs. Server):</strong> Running computer vision models directly in rural client mobile browsers causes device crashes and exposes private API keys. AI processing (Gemini Vision / price models) must reside in a secure backend microservice.
+      <strong>Risk 5: AI Workload Placement (Client vs. Server):</strong> Running computer vision models directly in rural client mobile browsers causes device crashes and exposes private API keys. AI processing (Groq Vision / price models) must reside in a secure backend microservice.
     </div>
   </div>
 
@@ -631,7 +631,7 @@
       <div class="layer-row">
         <div class="layer-title">AI & Optimization</div>
         <div class="layer-items">
-          <div class="layer-box" style="border-color: var(--accent);">Gemini Vision AI<small>Quality Grading (A/B/C)</small></div>
+          <div class="layer-box" style="border-color: var(--accent);">Groq Vision AI<small>Quality Grading (A/B/C)</small></div>
           <div class="layer-box" style="border-color: var(--accent);">Fair Price Corridor<small>Quality-Adjusted Multiplier</small></div>
           <div class="layer-box" style="border-color: var(--gold);">Hub Clustering<small>Spatial K-Means / DBSCAN</small></div>
           <div class="layer-box" style="border-color: var(--gold);">Route Optimizer<small>TSP / Vehicle Routing Engine</small></div>
@@ -687,7 +687,7 @@
       <ul class="phase-tasks">
         <li>Build mobile-friendly crop listing form (crop type, quantity, harvest timestamp, GPS coordinates).</li>
         <li>Add camera/photo upload handler with image preview and compression.</li>
-        <li>Integrate Gemini Multimodal API endpoint to analyze produce defects, color, and size uniformity; output transparent <strong>Grade A, B, or C</strong> rating.</li>
+        <li>Integrate Groq Vision Multimodal API endpoint to analyze produce defects, color, and size uniformity; output transparent <strong>Grade A, B, or C</strong> rating.</li>
       </ul>
     </div>
 

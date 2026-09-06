@@ -1,9 +1,8 @@
-// server.js - AI Produce Quality Inspection Backend
-// Powered by Google Gemini Vision API & gemini-3.7-flash multimodal model
+// server.js - PRAGATI Agricultural Marketplace AI Backend
+// Powered by Groq AI (Voice Assistant & Groq Vision Multimodal Inspection)
 
 import express from 'express';
 import dotenv from 'dotenv';
-import { GoogleGenAI } from '@google/genai';
 import Groq from 'groq-sdk';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -22,13 +21,13 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 5001;
-const GEMINI_MODEL_ID = process.env.GEMINI_MODEL_ID || 'gemini-3.7-flash';
 const GROQ_MODEL_ID =
   process.env.GROQ_MODEL_ID &&
   process.env.GROQ_MODEL_ID !== 'llama-3.3-70b-versatile' &&
   process.env.GROQ_MODEL_ID !== 'llama-3.1-8b-instant'
     ? process.env.GROQ_MODEL_ID
     : 'openai/gpt-oss-20b';
+const GROQ_VISION_MODEL_ID = process.env.GROQ_VISION_MODEL_ID || 'qwen/qwen3.6-27b';
 
 // Limit JSON body payload size (supports base64 image up to 8MB)
 app.use(express.json({ limit: '10mb' }));
@@ -51,8 +50,12 @@ app.get('/api/health', (req, res) => {
   res.json({
     status: 'ok',
     service: 'AI Produce Quality Check & Shared Marketplace',
-    provider: 'Google Gemini',
-    model: GEMINI_MODEL_ID,
+    provider: 'Groq',
+    model: GROQ_VISION_MODEL_ID,
+    models: {
+      voiceAssistant: GROQ_MODEL_ID,
+      cropQuality: GROQ_VISION_MODEL_ID,
+    },
     storage: listingStore.isPostgres ? 'PostgreSQL' : 'Local File-Synced Fallback',
   });
 });
@@ -407,7 +410,51 @@ function calibrateProduceQualityScore(rawScore, defectSeverity) {
   return score;
 }
 
-// Quality check endpoint
+// // Exponential backoff retry handler for transient Groq 429/rate-limit errors
+// Retries maximum 3 times with delays of approximately 1s, 2s, and 4s.
+// Never retries 401 invalid API key errors.
+async function invokeGroqWithRetry(fn, maxRetries = 3) {
+  const delays = [1000, 2000, 4000];
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      // Do not retry invalid API key errors (401)
+      const isAuthError =
+        err.status === 401 ||
+        err.message?.includes('invalid_api_key') ||
+        err.message?.includes('API key') ||
+        err.code === 'invalid_api_key';
+
+      if (isAuthError) {
+        throw err;
+      }
+
+      // Check if error is transient 429 rate limit
+      const isRateLimit =
+        err.status === 429 ||
+        err.message?.includes('rate_limit') ||
+        err.message?.includes('429') ||
+        err.code === 'rate_limit_exceeded';
+
+      if (isRateLimit && attempt < maxRetries) {
+        const delayMs = process.env.TEST_FAST_RETRY ? 50 : (delays[attempt] || Math.pow(2, attempt) * 1000);
+        const delayLabel = process.env.TEST_FAST_RETRY ? `${delayMs}ms` : `~${Math.round(delayMs / 1000)}s`;
+        console.warn(
+          `[Groq AI] Rate limit encountered (429). Retrying attempt ${attempt + 1}/${maxRetries} after ${delayLabel} backoff...`
+        );
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        continue;
+      }
+
+      // Re-throw if exhausted retries or not a rate-limit error
+      throw err;
+    }
+  }
+}
+
+// Quality check endpoint (Powered by Groq Vision)
 app.post('/api/quality-check', async (req, res) => {
   try {
     const { crop, image, mimeType } = req.body;
@@ -467,19 +514,19 @@ app.post('/api/quality-check', async (req, res) => {
       });
     }
 
-    // 3. Check Gemini API key configuration
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey || apiKey === 'your_gemini_api_key_here' || apiKey.trim() === '') {
+    // 3. Check Groq API key configuration
+    const apiKey = process.env.GROQ_API_KEY;
+    if (!apiKey || apiKey === 'your_groq_api_key_here' || apiKey.trim() === '') {
       return res.status(503).json({
         success: false,
         unconfigured: true,
-        error: 'Google Gemini API key not configured. Please set GEMINI_API_KEY in your server .env file.',
-        code: 'GEMINI_API_KEY_MISSING',
+        error: 'Groq API key not configured. Please set GROQ_API_KEY in your server environment.',
+        code: 'GROQ_API_KEY_MISSING',
       });
     }
 
-    // Initialize GoogleGenAI client strictly on the backend
-    const ai = new GoogleGenAI({ apiKey });
+    // Initialize Groq client strictly on the backend
+    const groq = new Groq({ apiKey });
 
     const promptText = `You are a certified agricultural produce grading inspector AI for the PRAGATI Indian farmer marketplace.
 Your role is to inspect the photograph of harvested agricultural produce and determine an objective, fair, and calibrated physical quality score.
@@ -560,27 +607,64 @@ For non-produce or unsuitable images:
   ]
 }`;
 
-    console.log(`[Gemini] Invoking ${GEMINI_MODEL_ID} for crop: ${crop}...`);
+    const candidateVisionModels = [
+      GROQ_VISION_MODEL_ID,
+      'qwen/qwen3.6-27b',
+      'qwen/qwen3.8-27b',
+    ].filter((m, i, arr) => m && arr.indexOf(m) === i);
 
-    const response = await ai.models.generateContent({
-      model: GEMINI_MODEL_ID,
-      contents: [
-        {
-          inlineData: {
-            data: base64Data,
-            mimeType: `image/${format}`,
-          },
-        },
-        promptText,
-      ],
-      config: {
-        responseMimeType: 'application/json',
-        temperature: 0.1,
-      },
-    });
+    const imageUrl = `data:image/${format};base64,${base64Data}`;
+    let chatCompletion = null;
+    let usedModel = GROQ_VISION_MODEL_ID;
 
-    const rawText = response?.text || '';
-    console.log('[Gemini] Raw response received.');
+    for (let i = 0; i < candidateVisionModels.length; i++) {
+      const modelToTry = candidateVisionModels[i];
+      try {
+        console.log(`[Groq Vision] Invoking ${modelToTry} for crop: ${crop}...`);
+        chatCompletion = await invokeGroqWithRetry(() =>
+          groq.chat.completions.create({
+            model: modelToTry,
+            messages: [
+              {
+                role: 'user',
+                content: [
+                  { type: 'text', text: promptText },
+                  {
+                    type: 'image_url',
+                    image_url: {
+                      url: imageUrl,
+                    },
+                  },
+                ],
+              },
+            ],
+            temperature: 0.1,
+            max_tokens: 800,
+            response_format: { type: 'json_object' },
+          })
+        );
+        usedModel = modelToTry;
+        break;
+      } catch (callErr) {
+        const isModelNotFoundError =
+          callErr.status === 404 ||
+          callErr.code === 'model_not_found' ||
+          callErr.message?.includes('model_not_found') ||
+          callErr.message?.includes('does not exist') ||
+          callErr.message?.includes('decommissioned');
+
+        if (isModelNotFoundError && i < candidateVisionModels.length - 1) {
+          console.warn(
+            `[Groq Vision] Model ${modelToTry} unavailable (${callErr.message}). Falling back to ${candidateVisionModels[i + 1]}...`
+          );
+          continue;
+        }
+        throw callErr;
+      }
+    }
+
+    const rawText = chatCompletion?.choices?.[0]?.message?.content || '';
+    console.log('[Groq Vision] Raw response received.');
 
     // 4. Safely extract and parse JSON
     let parsedResult = null;
@@ -591,7 +675,7 @@ For non-produce or unsuitable images:
         .trim();
       parsedResult = JSON.parse(cleanedText);
     } catch (parseErr) {
-      console.error('[Gemini] Failed to parse model JSON output:', parseErr.message, rawText);
+      console.error('[Groq Vision] Failed to parse model JSON output:', parseErr.message, rawText);
       return res.status(502).json({
         success: false,
         error: 'Model returned malformed assessment output.',
@@ -625,7 +709,7 @@ For non-produce or unsuitable images:
         grade: null,
         confidence,
         observations,
-        model: GEMINI_MODEL_ID,
+        model: usedModel,
         assessedAt: new Date().toISOString(),
       });
     }
@@ -649,25 +733,62 @@ For non-produce or unsuitable images:
       grade: finalGrade,
       confidence,
       observations,
-      model: GEMINI_MODEL_ID,
+      model: usedModel,
       assessedAt: new Date().toISOString(),
     });
   } catch (err) {
     console.error('[Error] /api/quality-check failure:', err.name, err.message);
 
-    if (err.message?.includes('API_KEY_INVALID') || err.message?.includes('API key not valid') || (err.status === 400 && err.message?.includes('key'))) {
+    // Authentication Error (Invalid API Key)
+    if (
+      err.status === 401 ||
+      err.message?.includes('invalid_api_key') ||
+      err.message?.includes('API key') ||
+      err.code === 'invalid_api_key'
+    ) {
       return res.status(401).json({
         success: false,
-        error: 'Google Gemini API key is invalid. Please check GEMINI_API_KEY in your server .env file.',
-        code: 'GEMINI_API_KEY_INVALID',
+        error: 'Groq API key is invalid. Please check GROQ_API_KEY in your server environment.',
+        code: 'GROQ_API_KEY_INVALID',
       });
     }
 
-    if (err.status === 429 || err.message?.includes('RESOURCE_EXHAUSTED') || err.message?.includes('quota')) {
+    // Rate Limit / Quota Error (429)
+    if (
+      err.status === 429 ||
+      err.message?.includes('rate_limit') ||
+      err.message?.includes('429') ||
+      err.code === 'rate_limit_exceeded'
+    ) {
       return res.status(429).json({
         success: false,
-        error: 'Google Gemini rate limit / quota exceeded. Please wait a moment before trying again.',
-        code: 'GEMINI_RATE_LIMITED',
+        error: 'Groq rate limit exceeded. Please wait a moment before trying again.',
+        code: 'GROQ_RATE_LIMITED',
+      });
+    }
+
+    // Model Not Found / Decommissioned Error (404)
+    if (
+      err.status === 404 ||
+      err.code === 'model_not_found' ||
+      err.message?.includes('model_not_found') ||
+      err.message?.includes('does not exist') ||
+      err.message?.includes('decommissioned')
+    ) {
+      return res.status(404).json({
+        success: false,
+        error: 'The requested Groq Vision model is currently unavailable or decommissioned. Please check GROQ_VISION_MODEL_ID.',
+        code: 'GROQ_MODEL_NOT_FOUND',
+        details: err.message,
+      });
+    }
+
+    // Service Unavailable / 503
+    if (err.status === 503) {
+      return res.status(503).json({
+        success: false,
+        error: 'Groq service is temporarily unavailable. Please try again in a moment.',
+        code: 'GROQ_SERVICE_UNAVAILABLE',
       });
     }
 
@@ -678,50 +799,6 @@ For non-produce or unsuitable images:
     });
   }
 });
-
-// Exponential backoff retry handler for transient Groq 429/rate-limit errors
-// Retries maximum 3 times with delays of approximately 1s, 2s, and 4s.
-// Never retries 401 invalid API key errors.
-async function invokeGroqWithRetry(fn, maxRetries = 3) {
-  const delays = [1000, 2000, 4000];
-
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    try {
-      return await fn();
-    } catch (err) {
-      // Do not retry invalid API key errors (401)
-      const isAuthError =
-        err.status === 401 ||
-        err.message?.includes('invalid_api_key') ||
-        err.message?.includes('API key') ||
-        err.code === 'invalid_api_key';
-
-      if (isAuthError) {
-        throw err;
-      }
-
-      // Check if error is transient 429 rate limit
-      const isRateLimit =
-        err.status === 429 ||
-        err.message?.includes('rate_limit') ||
-        err.message?.includes('429') ||
-        err.code === 'rate_limit_exceeded';
-
-      if (isRateLimit && attempt < maxRetries) {
-        const delayMs = process.env.TEST_FAST_RETRY ? 50 : (delays[attempt] || Math.pow(2, attempt) * 1000);
-        const delayLabel = process.env.TEST_FAST_RETRY ? `${delayMs}ms` : `~${Math.round(delayMs / 1000)}s`;
-        console.warn(
-          `[Groq Voice Assistant] Rate limit encountered (429). Retrying attempt ${attempt + 1}/${maxRetries} after ${delayLabel} backoff...`
-        );
-        await new Promise((resolve) => setTimeout(resolve, delayMs));
-        continue;
-      }
-
-      // Re-throw if exhausted retries or not a rate-limit error
-      throw err;
-    }
-  }
-}
 
 // AI Voice Assistant Endpoint (Powered by Groq)
 app.post('/api/voice-assistant', async (req, res) => {
@@ -909,6 +986,6 @@ app.get(/.*/, (req, res) => {
 });
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`[Server] Produce Quality Check API listening on http://localhost:${PORT}`);
-    console.log(`[Server] Provider: Google Gemini | Model: ${GEMINI_MODEL_ID}`);
+    console.log(`[Server] Provider: Groq | Voice: ${GROQ_MODEL_ID} | Vision: ${GROQ_VISION_MODEL_ID}`);
   });
 }

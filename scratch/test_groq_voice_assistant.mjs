@@ -8,7 +8,7 @@ import path from 'node:path';
 process.env.NODE_ENV = 'test';
 
 console.log('====================================================');
-console.log('  TESTING GROQ VOICE ASSISTANT & GEMINI ISOLATION');
+console.log('  TESTING COMPLETE GROQ MIGRATION (VOICE & VISION)');
 console.log('====================================================\n');
 
 // 1. Static checks
@@ -24,9 +24,11 @@ assert(serverSrc.includes('GROQ_RATE_LIMITED'), 'Must handle 429 rate limits wit
 assert(serverSrc.includes('GROQ_API_KEY_INVALID'), 'Must handle 401 with GROQ_API_KEY_INVALID');
 assert(serverSrc.includes('GROQ_MODEL_NOT_FOUND'), 'Must handle 404 with GROQ_MODEL_NOT_FOUND');
 
-// Ensure Quality Check remains on Gemini
-assert(serverSrc.includes("import { GoogleGenAI } from '@google/genai'"), 'Must retain GoogleGenAI for quality check');
-assert(serverSrc.includes('GEMINI_API_KEY'), 'Must retain GEMINI_API_KEY for quality check');
+// Ensure complete removal of Gemini and full migration to Groq
+assert(!serverSrc.includes('@google/genai'), 'Must remove @google/genai completely');
+assert(!serverSrc.includes('GEMINI_API_KEY'), 'Must remove GEMINI_API_KEY completely');
+assert(!serverSrc.includes('GoogleGenAI'), 'Must remove GoogleGenAI completely');
+assert(serverSrc.includes('GROQ_VISION_MODEL_ID'), 'Must configure GROQ_VISION_MODEL_ID');
 assert(serverSrc.includes("app.post('/api/quality-check'"), 'Must preserve /api/quality-check');
 
 // Ensure frontend has zero key leaks and accurate branding
@@ -101,8 +103,8 @@ try {
   if (savedKey) process.env.GROQ_API_KEY = savedKey;
   else delete process.env.GROQ_API_KEY;
 
-  // Test 2.5: Verify /api/quality-check remains functional and still uses Gemini
-  console.log('\n3. Verifying /api/quality-check Remains on Google Gemini...');
+  // Test 2.5: Verify /api/quality-check uses Groq Vision and does not touch Gemini
+  console.log('\n3. Verifying /api/quality-check Powered by Groq Vision...');
   const qcRes = await fetch(`http://localhost:${testPort}/api/quality-check`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -111,11 +113,10 @@ try {
       image: 'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////wgALCAABAAEBAREA/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxA=',
     }),
   });
-  // Should either succeed (200) or return quota/auth notice without touching Groq
   const qcData = await qcRes.json();
   console.log(`   ✓ /api/quality-check responded with status ${qcRes.status}`);
-  assert(!JSON.stringify(qcData).includes('Groq'), 'Quality check must never mention or use Groq');
-  console.log('   ✓ /api/quality-check strictly isolated to Google Gemini.');
+  assert(!JSON.stringify(qcData).includes('Gemini'), 'Quality check must never mention Gemini');
+  console.log('   ✓ /api/quality-check successfully verified on Groq Vision.');
 
   console.log('\n4. Testing invokeGroqWithRetry Exponential Backoff Logic...');
   process.env.TEST_FAST_RETRY = 'true';

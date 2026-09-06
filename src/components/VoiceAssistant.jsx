@@ -280,7 +280,7 @@ useEffect(() => {
           </div>
 
           <div className="voice-header-actions">
-            <span className="voice-gemini-pill">{va.badge || 'Powered by Groq'}</span>
+            <span className="voice-groq-pill">{va.badge || 'Powered by Groq'}</span>
             <div className="voice-lang-switcher">
               <button
                 type="button"
