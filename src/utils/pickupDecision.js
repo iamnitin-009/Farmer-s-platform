@@ -1,19 +1,9 @@
 // src/utils/pickupDecision.js
 // Deterministic Smart Pickup Decision Engine for SIH 2026
 
-/**
- * Predefined MVP Pickup Thresholds (in kg) for supported crops.
- * If quantity <= threshold: HUB PICKUP (Consolidated local aggregation)
- * If quantity >  threshold: HOME/FARM PICKUP (Direct farmgate bulk logistics)
- */
-export const PICKUP_THRESHOLDS = {
-  wheat: 100,   // <= 100 kg -> HUB, > 100 kg -> HOME
-  rice: 100,    // <= 100 kg -> HUB, > 100 kg -> HOME
-  potato: 75,   // <= 75 kg  -> HUB, > 75 kg  -> HOME
-  onion: 75,    // <= 75 kg  -> HUB, > 75 kg  -> HOME
-  tomato: 30,   // <= 30 kg  -> HUB, > 30 kg  -> HOME
-  fruits: 30,   // <= 30 kg  -> HUB, > 30 kg  -> HOME
-}
+import { PICKUP_THRESHOLDS, normalizeCropKey } from './cropConstants.js'
+
+export { PICKUP_THRESHOLDS }
 
 /**
  * Evaluates the smart pickup collection decision based on crop and quantity.
@@ -45,7 +35,7 @@ export function getPickupDecision(crop, quantity, lang = 'en') {
     }
   }
 
-  const cropKey = crop.toLowerCase().trim()
+  const cropKey = normalizeCropKey(crop) || crop.toLowerCase().trim()
   const threshold = PICKUP_THRESHOLDS[cropKey]
 
   // If crop is unknown or unsupported, return safe invalid/unsupported result (no silent default)

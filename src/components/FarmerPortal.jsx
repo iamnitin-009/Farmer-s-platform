@@ -12,11 +12,9 @@ import { getStepIndex } from '../utils/paymentEscrow.js'
 import { ensureListingTraceabilityId, generateQrDataUrl, getTraceabilityUrl } from '../utils/traceability.js'
 import { predictCropDemand, fetchDemandPrediction, getDemandBadgeStyle } from '../utils/demandPrediction.js'
 import { fetchListings, createListing as apiCreateListing, deleteListing as apiDeleteListing } from '../utils/listingService.js'
+import { CROP_KEYS, getCropVarieties } from '../utils/cropConstants.js'
 
 const STORAGE_KEY = 'sih_farmer_listings'
-
-// Pre-defined crops supported in the dropdown
-const CROP_KEYS = ['wheat', 'rice', 'potato', 'onion', 'tomato', 'fruits']
 
 function EscrowTimeline({ fulfillmentStatus, t }) {
   const steps = [
@@ -80,16 +78,82 @@ export default function FarmerPortal({ onNavigate, session, onLogout }) {
     return session?.id ? getFarmerOrders(session.id, session.mobile) : []
   })
 
-  const refreshFarmerOrders = () => {
-    if (session?.id) {
-      setFarmerOrders(getFarmerOrders(session.id, session.mobile))
+  const refreshFarmerOrders = async () => {
+    if (!session?.id) return
+    const local = getFarmerOrders(session.id, session.mobile) || []
+    try {
+      const res = await fetch(`/api/orders?farmerId=${encodeURIComponent(session.id)}`)
+      if (res.ok) {
+        const data = await res.json()
+        const serverOrders = data.orders || (Array.isArray(data) ? data : [])
+        if (Array.isArray(serverOrders) && serverOrders.length > 0) {
+          const serverIds = new Set(serverOrders.map((o) => o.id || o.orderId))
+          const filteredLocal = local.filter((o) => !serverIds.has(o.id || o.orderId))
+          setFarmerOrders([...serverOrders, ...filteredLocal])
+          return
+        }
+      }
+    } catch (e) {
+      console.warn('Could not fetch server orders:', e)
     }
+    setFarmerOrders(local)
   }
+
+  useEffect(() => {
+    refreshFarmerOrders()
+  }, [session])
 
   const handleAdvanceFarmerOrder = (orderId) => {
     const res = advanceOrderStatus(orderId)
     if (res.success) {
       refreshFarmerOrders()
+    }
+  }
+
+  const handleAcceptAllocation = async (allocationId) => {
+    try {
+      const res = await fetch(`/api/allocations/${encodeURIComponent(allocationId)}/accept`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ farmerId: session?.id }),
+      })
+      const result = await res.json()
+      if (result.success) {
+        refreshFarmerOrders()
+        fetchListings({ role: 'farmer' }, session).then((sl) => {
+          if (Array.isArray(sl)) setListings(sl)
+        }).catch(() => {})
+      } else {
+        alert(result.error || 'Failed to accept allocation')
+      }
+    } catch (err) {
+      console.error(err)
+      alert('Network error accepting allocation')
+    }
+  }
+
+  const handleRejectAllocation = async (allocationId) => {
+    if (!window.confirm(lang === 'hi' ? 'क्या आप इस मांग आवंटन को अस्वीकार करना चाहते हैं? बची हुई मांग अन्य किसानों को पुनः आवंटित कर दी जाएगी।' : 'Are you sure you want to reject this allocation? The demand will be reallocated to the next available farmer.')) {
+      return
+    }
+    try {
+      const res = await fetch(`/api/allocations/${encodeURIComponent(allocationId)}/reject`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ farmerId: session?.id, reason: 'Farmer declined' }),
+      })
+      const result = await res.json()
+      if (result.success) {
+        refreshFarmerOrders()
+        fetchListings({ role: 'farmer' }, session).then((sl) => {
+          if (Array.isArray(sl)) setListings(sl)
+        }).catch(() => {})
+      } else {
+        alert(result.error || 'Failed to reject allocation')
+      }
+    } catch (err) {
+      console.error(err)
+      alert('Network error rejecting allocation')
     }
   }
 
@@ -175,6 +239,7 @@ export default function FarmerPortal({ onNavigate, session, onLogout }) {
 
   // Form state - pre-fill location from farmer profile if available
   const [crop, setCrop] = useState('')
+  const [variety, setVariety] = useState('')
   const [quantity, setQuantity] = useState('')
   const [price, setPrice] = useState('')
   const [location, setLocation] = useState(session?.location || '')
@@ -182,6 +247,8 @@ export default function FarmerPortal({ onNavigate, session, onLogout }) {
   const [photo, setPhoto] = useState(null)
   const [photoName, setPhotoName] = useState('')
   const [priceApplied, setPriceApplied] = useState(false)
+
+  const availableVarieties = crop ? getCropVarieties(crop) : []
 
   // Deterministic AI Fair Price calculation based on crop baseline, grade, and volume
   const fairPriceResult = crop
@@ -420,6 +487,7 @@ export default function FarmerPortal({ onNavigate, session, onLogout }) {
       farmerName: session?.name || 'Farmer',
       farmerMobile: session?.mobile || '',
       crop,
+      variety: variety || 'Regular',
       quantity: parseFloat(quantity),
       price: parseFloat(price),
       location: location.trim(),
@@ -459,6 +527,7 @@ export default function FarmerPortal({ onNavigate, session, onLogout }) {
 
     // Reset form fields
     setCrop('')
+    setVariety('')
     setQuantity('')
     setPrice('')
     setLocation(session?.location || '')
@@ -741,7 +810,10 @@ export default function FarmerPortal({ onNavigate, session, onLogout }) {
                       className={`form-input form-select ${errors.crop ? 'input-error' : ''}`}
                       value={crop}
                       onChange={(e) => {
-                        setCrop(e.target.value)
+                        const newCrop = e.target.value
+                        setCrop(newCrop)
+                        const vars = getCropVarieties(newCrop)
+                        setVariety(vars[0] || 'Regular')
                         if (errors.crop) setErrors((prev) => ({ ...prev, crop: undefined }))
                       }}
                     >
@@ -754,6 +826,27 @@ export default function FarmerPortal({ onNavigate, session, onLogout }) {
                     </select>
                     {errors.crop && <span className="form-error">{errors.crop}</span>}
                   </div>
+
+                  {/* Variety Dropdown (BFM-001 / CROP-001) */}
+                  {availableVarieties.length > 0 && (
+                    <div className="form-group full-width">
+                      <label htmlFor="varietySelect" className="form-label">
+                        {portalT.varietyLabel || (lang === 'hi' ? 'किस्म (Variety)' : 'Variety')} <span className="req">*</span>
+                      </label>
+                      <select
+                        id="varietySelect"
+                        className="form-input form-select"
+                        value={variety}
+                        onChange={(e) => setVariety(e.target.value)}
+                      >
+                        {availableVarieties.map((v) => (
+                          <option key={v} value={v}>
+                            {portalT.varieties?.[v] || v}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
 
                   {/* Quantity */}
                   <div className="form-group">
@@ -1545,6 +1638,47 @@ export default function FarmerPortal({ onNavigate, session, onLogout }) {
                             </button>
                           </div>
                         </div>
+
+                        {/* Allocation Actions for Multi-Farmer Engine */}
+                        {order.allocationId && (
+                          <div className="allocation-action-row" style={{ margin: '12px 0', padding: '10px', background: '#f8fafc', borderRadius: '8px', border: '1px solid #e2e8f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '8px' }}>
+                            <div>
+                              <span style={{ fontSize: '0.85rem', fontWeight: '600' }}>
+                                {lang === 'hi' ? 'आवंटन स्थिति:' : 'Allocation Status:'}{' '}
+                              </span>
+                              <span style={{
+                                padding: '3px 10px',
+                                borderRadius: '12px',
+                                fontSize: '0.8rem',
+                                fontWeight: 'bold',
+                                background: order.allocationStatus === 'ACCEPTED' ? '#dcfce7' : order.allocationStatus === 'REJECTED' ? '#fee2e2' : '#fef9c3',
+                                color: order.allocationStatus === 'ACCEPTED' ? '#15803d' : order.allocationStatus === 'REJECTED' ? '#b91c1c' : '#854d0e',
+                              }}>
+                                ● {order.allocationStatus || 'PENDING'}
+                              </span>
+                            </div>
+                            {order.allocationStatus === 'PENDING' && (
+                              <div style={{ display: 'flex', gap: '8px' }}>
+                                <button
+                                  type="button"
+                                  className="btn btn-sm btn-primary"
+                                  style={{ background: '#16a34a', borderColor: '#16a34a' }}
+                                  onClick={() => handleAcceptAllocation(order.allocationId)}
+                                >
+                                  ✓ {lang === 'hi' ? 'स्वीकार करें' : 'Accept Allocation'}
+                                </button>
+                                <button
+                                  type="button"
+                                  className="btn btn-sm btn-outline"
+                                  style={{ color: '#dc2626', borderColor: '#dc2626' }}
+                                  onClick={() => handleRejectAllocation(order.allocationId)}
+                                >
+                                  ✕ {lang === 'hi' ? 'अस्वीकार करें' : 'Reject'}
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        )}
 
                         {/* Action Controls for Demo Progression */}
                         <div className="order-escrow-actions">

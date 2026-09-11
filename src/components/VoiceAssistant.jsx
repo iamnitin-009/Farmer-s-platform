@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react'
 import { useLanguage } from '../context/LanguageContext.jsx'
 import { IconMic } from './Icons.jsx'
+import { CROP_KEYS } from '../utils/cropConstants.js'
 
 export default function VoiceAssistant({ isOpen, onClose, session }) {
   const { t, lang, setLang } = useLanguage()
@@ -209,7 +210,7 @@ useEffect(() => {
           context: {
             role: session?.role || 'user',
             name: session?.name || 'Guest User',
-            supportedCrops: ['wheat', 'rice', 'potato', 'onion', 'tomato', 'fruits'],
+            supportedCrops: CROP_KEYS,
           },
         }),
       })

@@ -1,18 +1,9 @@
 // src/utils/fairPrice.js
 // Deterministic Fair Price Suggestion Engine for SIH 2026
 
-/**
- * Benchmark Mandi base prices (₹/kg) across supported crops in India.
- * Reflects normalized wholesale baseline rates.
- */
-export const CROP_BASE_PRICES = {
-  wheat: 25,    // Standard wheat/gehu baseline (MSP ~₹24-27/kg)
-  rice: 35,     // Paddy/chawal baseline (~₹30-40/kg)
-  potato: 18,   // Aloo mandi baseline (~₹15-22/kg)
-  onion: 28,    // Pyaz mandi baseline (~₹24-35/kg)
-  tomato: 30,   // Tamatar mandi baseline (~₹25-40/kg)
-  fruits: 60,   // Mixed seasonal fruits baseline (~₹50-80/kg)
-}
+import { CROP_BASE_PRICES, normalizeCropKey } from './cropConstants.js'
+
+export { CROP_BASE_PRICES }
 
 /**
  * Quality Grade Multipliers based on deterministic AI quality check.
@@ -61,8 +52,8 @@ export const QUANTITY_TIERS = [
  */
 export function calculateFairPrice({ crop, quantity, grade, lang = 'en' } = {}) {
   if (!crop || typeof crop !== 'string') return null
-  const cropKey = crop.toLowerCase().trim()
-  const basePrice = CROP_BASE_PRICES[cropKey] || 30
+  const cropKey = normalizeCropKey(crop) || crop.toLowerCase().trim()
+  const basePrice = CROP_BASE_PRICES[cropKey] || 35
 
   // 1. Grade Multiplier
   const gradeKey = grade ? String(grade).toUpperCase().trim() : null

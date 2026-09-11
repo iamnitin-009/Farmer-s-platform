@@ -1,12 +1,13 @@
 // server/listingStore.js
-// Adaptive shared persistence engine for Agricultural Marketplace listings.
-// Supports PostgreSQL in production (Render DATABASE_URL) and a thread-safe
-// file-synced local fallback for offline development, CI, and testing.
+// Adaptive shared persistence engine for Agricultural Marketplace listings & orders.
+// Supports PostgreSQL in production and a thread-safe local file fallback for development.
+// Fully implements BFM-001 Parent Order + Farmer Allocations, Atomic Reservations, and Concurrency Protection.
 
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import pg from 'pg';
+import { allocateMultiFarmerOrder, normalizeBuyerRequirement } from './matchingEngine.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -16,7 +17,23 @@ const DATA_FILE_ORDERS = path.join(DATA_DIR, 'orders.json');
 
 const { Pool } = pg;
 
-// Legacy seed listing IDs targeted for deletion
+// Simple async Mutex to serialize concurrent mutations in local fallback mode
+class AsyncMutex {
+  constructor() {
+    this._queue = Promise.resolve();
+  }
+
+  lock() {
+    let unlockNext;
+    const willLock = new Promise((resolve) => {
+      unlockNext = resolve;
+    });
+    const willWait = this._queue.then(() => unlockNext);
+    this._queue = this._queue.then(() => willLock);
+    return willWait;
+  }
+}
+
 const SEED_LISTING_IDS = [
   'seed_listing_wheat_01',
   'seed_listing_tomato_02',
@@ -24,7 +41,6 @@ const SEED_LISTING_IDS = [
   'seed_listing_potato_04',
 ];
 
-// No dummy seed listings
 const SEED_LISTINGS = [];
 
 class ListingStore {
@@ -34,6 +50,7 @@ class ListingStore {
     this.inMemoryListings = [];
     this.inMemoryOrders = [];
     this.initialized = false;
+    this.mutex = new AsyncMutex();
   }
 
   async init() {
@@ -42,13 +59,14 @@ class ListingStore {
     if (this.isPostgres) {
       try {
         console.log('[ListingStore] Connecting to PostgreSQL at DATABASE_URL...');
-        const isLocalhost = process.env.DATABASE_URL.includes('localhost') || process.env.DATABASE_URL.includes('127.0.0.1');
+        const isLocalhost =
+          process.env.DATABASE_URL.includes('localhost') ||
+          process.env.DATABASE_URL.includes('127.0.0.1');
         this.pool = new Pool({
           connectionString: process.env.DATABASE_URL,
           ssl: isLocalhost ? false : { rejectUnauthorized: false },
         });
 
-        // Test connection
         const client = await this.pool.connect();
         try {
           await client.query(`
@@ -58,7 +76,9 @@ class ListingStore {
               farmer_name VARCHAR(255),
               farmer_mobile VARCHAR(50),
               crop VARCHAR(50) NOT NULL,
+              variety VARCHAR(100),
               quantity NUMERIC NOT NULL,
+              reserved_quantity NUMERIC DEFAULT 0,
               price NUMERIC NOT NULL,
               location VARCHAR(255) NOT NULL,
               harvest_date VARCHAR(50),
@@ -78,9 +98,14 @@ class ListingStore {
               buyer_id VARCHAR(100),
               buyer_name VARCHAR(255),
               buyer_mobile VARCHAR(50),
+              buyer_location VARCHAR(255),
               listing_id VARCHAR(100),
               crop VARCHAR(50) NOT NULL,
+              variety VARCHAR(100),
               quantity NUMERIC NOT NULL,
+              requested_quantity NUMERIC,
+              fulfilled_quantity NUMERIC,
+              remaining_quantity NUMERIC DEFAULT 0,
               price_per_kg NUMERIC,
               total_amount NUMERIC,
               farmer_id VARCHAR(100),
@@ -88,20 +113,29 @@ class ListingStore {
               farmer_mobile VARCHAR(50),
               fulfillment_status VARCHAR(50) DEFAULT 'PAYMENT_SECURED',
               status VARCHAR(50) DEFAULT 'Payment Secured',
+              allocations JSONB DEFAULT '[]',
+              requirement JSONB,
               created_at TIMESTAMPTZ DEFAULT NOW(),
               updated_at TIMESTAMPTZ DEFAULT NOW()
             );
           `);
 
-          // Purge ONLY the 4 legacy seed listings from PostgreSQL on startup
-          const purgeResult = await client.query(
-            'DELETE FROM listings WHERE id IN ($1, $2, $3, $4)',
-            SEED_LISTING_IDS
-          );
-          if (purgeResult.rowCount > 0) {
-            console.log(`[ListingStore] Purged ${purgeResult.rowCount} legacy seed listing(s) from PostgreSQL.`);
-          }
-          console.log('[ListingStore] ✅ PostgreSQL listings & orders storage ready & synchronized.');
+          // Run defensive migrations for existing schemas
+          await client.query(`
+            ALTER TABLE listings ADD COLUMN IF NOT EXISTS variety VARCHAR(100);
+            ALTER TABLE listings ADD COLUMN IF NOT EXISTS reserved_quantity NUMERIC DEFAULT 0;
+            ALTER TABLE orders ADD COLUMN IF NOT EXISTS variety VARCHAR(100);
+            ALTER TABLE orders ADD COLUMN IF NOT EXISTS requested_quantity NUMERIC;
+            ALTER TABLE orders ADD COLUMN IF NOT EXISTS fulfilled_quantity NUMERIC;
+            ALTER TABLE orders ADD COLUMN IF NOT EXISTS remaining_quantity NUMERIC DEFAULT 0;
+            ALTER TABLE orders ADD COLUMN IF NOT EXISTS buyer_location VARCHAR(255);
+            ALTER TABLE orders ADD COLUMN IF NOT EXISTS allocations JSONB DEFAULT '[]';
+            ALTER TABLE orders ADD COLUMN IF NOT EXISTS requirement JSONB;
+          `);
+
+          // Purge legacy seed listings
+          await client.query('DELETE FROM listings WHERE id IN ($1, $2, $3, $4)', SEED_LISTING_IDS);
+          console.log('[ListingStore] ✅ PostgreSQL initialized with variety, reservation, & BFM-001 allocations schema.');
         } finally {
           client.release();
         }
@@ -119,8 +153,7 @@ class ListingStore {
   }
 
   initLocalStore() {
-    console.log('[ListingStore] ℹ️ Operating in local fallback mode.');
-    console.log('[ListingStore] Notice: For permanent persistence on Render, set DATABASE_URL (Render PostgreSQL, Supabase, or Neon).');
+    console.log('[ListingStore] ℹ️ Operating in local file-synced fallback mode.');
 
     try {
       if (!fs.existsSync(DATA_DIR)) {
@@ -135,20 +168,24 @@ class ListingStore {
         } catch {
           this.inMemoryListings = [];
         }
-        // Purge legacy seed listings from local storage if present
-        const initialCount = this.inMemoryListings.length;
-        this.inMemoryListings = this.inMemoryListings.filter(
-          (item) => !SEED_LISTING_IDS.includes(item.id)
-        );
-        if (this.inMemoryListings.length !== initialCount) {
-          this.saveLocalStore();
-        }
+        // Normalize listings defensively
+        this.inMemoryListings = this.inMemoryListings
+          .filter((item) => !SEED_LISTING_IDS.includes(item.id))
+          .map((item) => ({
+            ...item,
+            variety: item.variety || null,
+            reservedQuantity: parseFloat(item.reservedQuantity || item.reserved_quantity || 0),
+            availableQuantity: Math.max(
+              0,
+              (parseFloat(item.quantity) || 0) - parseFloat(item.reservedQuantity || item.reserved_quantity || 0)
+            ),
+          }));
+        this.saveLocalStore();
       } else {
         this.inMemoryListings = [];
         this.saveLocalStore();
       }
 
-      // Load orders
       if (fs.existsSync(DATA_FILE_ORDERS)) {
         const rawOrders = fs.readFileSync(DATA_FILE_ORDERS, 'utf8');
         try {
@@ -157,12 +194,22 @@ class ListingStore {
         } catch {
           this.inMemoryOrders = [];
         }
+        // Normalize orders defensively
+        this.inMemoryOrders = this.inMemoryOrders.map((o) => ({
+          ...o,
+          variety: o.variety || null,
+          requestedQuantity: parseFloat(o.requestedQuantity ?? o.quantity ?? 0),
+          fulfilledQuantity: parseFloat(o.fulfilledQuantity ?? o.quantity ?? 0),
+          remainingQuantity: parseFloat(o.remainingQuantity ?? 0),
+          allocations: Array.isArray(o.allocations) ? o.allocations : [],
+        }));
+        this.saveLocalOrders();
       } else {
         this.inMemoryOrders = [];
         this.saveLocalOrders();
       }
     } catch (err) {
-      console.error('[ListingStore] Error reading local data file, initializing in-memory:', err.message);
+      console.error('[ListingStore] Error reading local data file:', err.message);
       this.inMemoryListings = [];
       this.inMemoryOrders = [];
     }
@@ -190,66 +237,33 @@ class ListingStore {
     }
   }
 
-  // Helper to map DB row to JS listing object
   rowToListing(row) {
     if (!row) return null;
+    const qty = parseFloat(row.quantity);
+    const reserved = parseFloat(row.reserved_quantity || 0);
     return {
       id: row.id,
       farmerId: row.farmer_id,
       farmerName: row.farmer_name,
       farmerMobile: row.farmer_mobile,
       crop: row.crop,
-      quantity: parseFloat(row.quantity),
+      variety: row.variety || null,
+      quantity: qty,
+      reservedQuantity: reserved,
+      availableQuantity: Math.max(0, qty - reserved),
       price: parseFloat(row.price),
       location: row.location,
       harvestDate: row.harvest_date,
       photo: row.photo,
-      quality: row.quality,
-      fairPrice: row.fair_price,
-      pickupDecision: row.pickup_decision,
+      quality: typeof row.quality === 'string' ? JSON.parse(row.quality) : (row.quality || null),
+      fairPrice: typeof row.fair_price === 'string' ? JSON.parse(row.fair_price) : (row.fair_price || null),
+      pickupDecision: typeof row.pickup_decision === 'string' ? JSON.parse(row.pickup_decision) : (row.pickup_decision || null),
       status: row.status,
       moderationStatus: row.moderation_status,
       traceabilityId: row.traceability_id,
       createdAt: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString(),
       updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : new Date().toISOString(),
     };
-  }
-
-  async insertPgListing(client, item) {
-    const q = `
-      INSERT INTO listings (
-        id, farmer_id, farmer_name, farmer_mobile, crop, quantity, price,
-        location, harvest_date, photo, quality, fair_price, pickup_decision,
-        status, moderation_status, traceability_id, created_at, updated_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
-      ON CONFLICT (id) DO UPDATE SET
-        quantity = EXCLUDED.quantity,
-        price = EXCLUDED.price,
-        status = EXCLUDED.status,
-        moderation_status = EXCLUDED.moderation_status,
-        updated_at = EXCLUDED.updated_at
-    `;
-    const now = item.createdAt || new Date().toISOString();
-    await client.query(q, [
-      item.id,
-      item.farmerId || 'demo_farmer',
-      item.farmerName || 'Farmer',
-      item.farmerMobile || '',
-      item.crop.toLowerCase(),
-      item.quantity,
-      item.price,
-      item.location,
-      item.harvestDate || '',
-      item.photo || null,
-      JSON.stringify(item.quality || null),
-      JSON.stringify(item.fairPrice || null),
-      JSON.stringify(item.pickupDecision || null),
-      item.status || 'Listed',
-      item.moderationStatus || 'approved',
-      item.traceabilityId || null,
-      now,
-      now,
-    ]);
   }
 
   async getAllListings(filters = {}) {
@@ -261,13 +275,11 @@ class ListingStore {
       const values = [];
 
       if (role === 'admin') {
-        // Admin sees all listings regardless of status
+        // Admin sees all listings
       } else if (farmerId) {
-        // Farmer sees all listings or their own
         values.push(farmerId);
         conditions.push(`(farmer_id = $${values.length})`);
       } else {
-        // Public / Buyer marketplace: show active/approved listings with inventory > 0
         conditions.push(`quantity > 0`);
         conditions.push(`moderation_status != 'rejected'`);
       }
@@ -288,20 +300,17 @@ class ListingStore {
       return res.rows.map((r) => this.rowToListing(r));
     }
 
-    // Local in-memory fallback
     let result = [...this.inMemoryListings];
-
     if (role === 'admin') {
-      // Admin sees everything
+      // All
     } else if (farmerId) {
       result = result.filter((l) => l.farmerId === farmerId);
     } else {
-      // Public / Buyer
       result = result.filter((l) => l.quantity > 0 && l.moderationStatus !== 'rejected');
     }
 
     if (crop) {
-      result = result.filter((l) => l.crop.toLowerCase() === crop.toLowerCase());
+      result = result.filter((l) => (l.crop || '').toLowerCase() === crop.toLowerCase());
     }
 
     if (status && status !== 'all') {
@@ -323,9 +332,16 @@ class ListingStore {
       return res.rows[0] ? this.rowToListing(res.rows[0]) : null;
     }
 
-    return (
-      this.inMemoryListings.find((l) => l.id === id || l.traceabilityId === id) || null
-    );
+    const found = this.inMemoryListings.find((l) => l.id === id || l.traceabilityId === id);
+    if (!found) return null;
+    const qty = parseFloat(found.quantity || 0);
+    const reserved = parseFloat(found.reservedQuantity || 0);
+    return {
+      ...found,
+      quantity: qty,
+      reservedQuantity: reserved,
+      availableQuantity: Math.max(0, qty - reserved),
+    };
   }
 
   async createListing(data) {
@@ -338,7 +354,10 @@ class ListingStore {
       farmerName: data.farmerName || 'Farmer',
       farmerMobile: data.farmerMobile || '',
       crop: (data.crop || '').toLowerCase(),
+      variety: data.variety || null,
       quantity: parseFloat(data.quantity) || 0,
+      reservedQuantity: 0,
+      availableQuantity: parseFloat(data.quantity) || 0,
       price: parseFloat(data.price) || 0,
       location: (data.location || '').trim(),
       harvestDate: data.harvestDate || '',
@@ -348,14 +367,56 @@ class ListingStore {
       pickupDecision: data.pickupDecision || null,
       status: data.status || 'Listed',
       moderationStatus: data.moderationStatus || 'approved',
-      traceabilityId: data.traceabilityId || `TRC-${(data.crop || 'CROP').toUpperCase()}-${Date.now().toString().slice(-4)}`,
+      traceabilityId:
+        data.traceabilityId ||
+        `TRC-${(data.crop || 'CROP').toUpperCase()}-${Date.now().toString().slice(-4)}`,
       createdAt: data.createdAt || new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
 
     if (this.isPostgres && this.pool) {
-      await this.insertPgListing(this.pool, item);
-      return this.getListingById(id);
+      const q = `
+        INSERT INTO listings (
+          id, farmer_id, farmer_name, farmer_mobile, crop, variety, quantity,
+          reserved_quantity, price, location, harvest_date, photo, quality,
+          fair_price, pickup_decision, status, moderation_status, traceability_id,
+          created_at, updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+        ON CONFLICT (id) DO UPDATE SET
+          quantity = EXCLUDED.quantity,
+          price = EXCLUDED.price,
+          status = EXCLUDED.status,
+          moderation_status = EXCLUDED.moderation_status,
+          updated_at = EXCLUDED.updated_at
+      `;
+      const client = await this.pool.connect();
+      try {
+        await client.query(q, [
+          item.id,
+          item.farmerId,
+          item.farmerName,
+          item.farmerMobile,
+          item.crop,
+          item.variety,
+          item.quantity,
+          item.reservedQuantity,
+          item.price,
+          item.location,
+          item.harvestDate,
+          item.photo,
+          JSON.stringify(item.quality),
+          JSON.stringify(item.fairPrice),
+          JSON.stringify(item.pickupDecision),
+          item.status,
+          item.moderationStatus,
+          item.traceabilityId,
+          item.createdAt,
+          item.updatedAt,
+        ]);
+        return this.getListingById(id);
+      } finally {
+        client.release();
+      }
     }
 
     this.inMemoryListings.unshift(item);
@@ -371,7 +432,9 @@ class ListingStore {
     if (this.isPostgres && this.pool) {
       const allowedKeys = [
         'crop',
+        'variety',
         'quantity',
+        'reservedQuantity',
         'price',
         'location',
         'harvestDate',
@@ -388,7 +451,6 @@ class ListingStore {
       for (const [k, v] of Object.entries(updates)) {
         if (!allowedKeys.includes(k)) continue;
         values.push(typeof v === 'object' && v !== null ? JSON.stringify(v) : v);
-        // Map to snake_case column
         const col = k.replace(/([A-Z])/g, '_$1').toLowerCase();
         sets.push(`${col} = $${values.length}`);
       }
@@ -396,8 +458,8 @@ class ListingStore {
       if (sets.length > 0) {
         values.push(new Date().toISOString());
         sets.push(`updated_at = $${values.length}`);
-
         values.push(id);
+
         const query = `UPDATE listings SET ${sets.join(', ')} WHERE id = $${values.length} RETURNING *`;
         const res = await this.pool.query(query, values);
         return res.rows[0] ? this.rowToListing(res.rows[0]) : null;
@@ -408,9 +470,18 @@ class ListingStore {
     const idx = this.inMemoryListings.findIndex((l) => l.id === id);
     if (idx === -1) return null;
 
+    const current = this.inMemoryListings[idx];
+    const newQty = updates.quantity !== undefined ? parseFloat(updates.quantity) : current.quantity;
+    const newReserved = updates.reservedQuantity !== undefined
+      ? parseFloat(updates.reservedQuantity)
+      : (current.reservedQuantity || 0);
+
     this.inMemoryListings[idx] = {
-      ...this.inMemoryListings[idx],
+      ...current,
       ...updates,
+      quantity: newQty,
+      reservedQuantity: newReserved,
+      availableQuantity: Math.max(0, newQty - newReserved),
       updatedAt: new Date().toISOString(),
     };
     this.saveLocalStore();
@@ -419,12 +490,10 @@ class ListingStore {
 
   async deleteListing(id) {
     await this.init();
-
     if (this.isPostgres && this.pool) {
       const res = await this.pool.query('DELETE FROM listings WHERE id = $1', [id]);
       return res.rowCount > 0;
     }
-
     const before = this.inMemoryListings.length;
     this.inMemoryListings = this.inMemoryListings.filter((l) => l.id !== id);
     if (this.inMemoryListings.length !== before) {
@@ -434,45 +503,59 @@ class ListingStore {
     return false;
   }
 
-  async resetSeedData() {
-    await this.init();
-    if (this.isPostgres && this.pool) {
-      await this.pool.query(
-        'DELETE FROM listings WHERE id IN ($1, $2, $3, $4)',
-        SEED_LISTING_IDS
-      );
-    } else {
-      this.inMemoryListings = this.inMemoryListings.filter(
-        (item) => !SEED_LISTING_IDS.includes(item.id)
-      );
-      this.saveLocalStore();
-    }
-    return true;
-  }
-
   // -------------------------------------------------------------
-  // Orders Management & Persistence (PostgreSQL & Local File)
+  // Orders & BFM-001 Allocation Engine
   // -------------------------------------------------------------
 
   rowToOrder(row) {
     if (!row) return null;
+    let allocations = [];
+    if (Array.isArray(row.allocations)) {
+      allocations = row.allocations;
+    } else if (typeof row.allocations === 'string') {
+      try {
+        allocations = JSON.parse(row.allocations);
+      } catch {
+        allocations = [];
+      }
+    }
+
+    let req = null;
+    if (typeof row.requirement === 'string') {
+      try {
+        req = JSON.parse(row.requirement);
+      } catch {
+        req = null;
+      }
+    } else if (typeof row.requirement === 'object') {
+      req = row.requirement;
+    }
+
     return {
       id: row.id,
       orderId: row.id,
       buyerId: row.buyer_id,
       buyerName: row.buyer_name,
       buyerMobile: row.buyer_mobile,
-      listingId: row.listing_id,
+      buyerLocation: row.buyer_location || '',
+      listingId: row.listing_id || (allocations[0]?.listingId || null),
       crop: row.crop,
-      quantity: parseFloat(row.quantity),
-      quantityKg: parseFloat(row.quantity),
+      variety: row.variety || (allocations[0]?.variety || null),
+      quantity: parseFloat(row.quantity || row.fulfilled_quantity || 0),
+      quantityKg: parseFloat(row.quantity || row.fulfilled_quantity || 0),
+      requestedQuantity: parseFloat(row.requested_quantity ?? row.quantity ?? 0),
+      fulfilledQuantity: parseFloat(row.fulfilled_quantity ?? row.quantity ?? 0),
+      remainingQuantity: parseFloat(row.remaining_quantity || 0),
       pricePerKg: parseFloat(row.price_per_kg || 0),
+      ratePerKg: parseFloat(row.price_per_kg || 0),
       totalAmount: parseFloat(row.total_amount || 0),
-      farmerId: row.farmer_id,
-      farmerName: row.farmer_name,
-      farmerMobile: row.farmer_mobile,
+      farmerId: row.farmer_id || (allocations[0]?.farmerId || null),
+      farmerName: row.farmer_name || (allocations[0]?.farmerName || null),
+      farmerMobile: row.farmer_mobile || (allocations[0]?.farmerMobile || null),
       fulfillmentStatus: row.fulfillment_status,
       status: row.status,
+      allocations,
+      requirement: req,
       createdAt: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString(),
       updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : new Date().toISOString(),
     };
@@ -481,12 +564,12 @@ class ListingStore {
   async getAllOrders({ crop, buyerId, farmerId } = {}) {
     await this.init();
 
+    let orders = [];
     if (this.isPostgres && this.pool) {
       const client = await this.pool.connect();
       try {
         let q = 'SELECT * FROM orders WHERE 1=1';
         const params = [];
-
         if (crop) {
           params.push(crop.toLowerCase());
           q += ` AND LOWER(crop) = $${params.length}`;
@@ -495,89 +578,425 @@ class ListingStore {
           params.push(buyerId);
           q += ` AND buyer_id = $${params.length}`;
         }
-        if (farmerId) {
-          params.push(farmerId);
-          q += ` AND farmer_id = $${params.length}`;
-        }
-
-        q += ' ORDER BY created_at ASC';
+        q += ' ORDER BY created_at DESC';
         const res = await client.query(q, params);
-        return res.rows.map((r) => this.rowToOrder(r));
+        orders = res.rows.map((r) => this.rowToOrder(r));
       } finally {
         client.release();
       }
+    } else {
+      orders = [...this.inMemoryOrders];
+      if (crop) {
+        orders = orders.filter((o) => (o.crop || '').toLowerCase() === crop.toLowerCase());
+      }
+      if (buyerId) {
+        orders = orders.filter((o) => o.buyerId === buyerId);
+      }
     }
 
-    // Local fallback
-    let list = [...this.inMemoryOrders];
-    if (crop) {
-      list = list.filter((o) => (o.crop || '').toLowerCase() === crop.toLowerCase());
-    }
-    if (buyerId) {
-      list = list.filter((o) => o.buyerId === buyerId);
-    }
+    // Filter for Farmer visibility:
+    // Farmer should ONLY see orders containing their allocation, and ONLY their allocation details!
     if (farmerId) {
-      list = list.filter((o) => o.farmerId === farmerId);
+      orders = orders
+        .filter((o) => {
+          const hasAlloc = Array.isArray(o.allocations) && o.allocations.some((a) => a.farmerId === farmerId);
+          const hasLegacy = o.farmerId === farmerId;
+          return hasAlloc || hasLegacy;
+        })
+        .map((o) => {
+          // If multi-farmer order, redact other farmers' allocations
+          if (Array.isArray(o.allocations) && o.allocations.length > 0) {
+            const myAllocs = o.allocations.filter((a) => a.farmerId === farmerId);
+            return {
+              ...o,
+              allocations: myAllocs,
+              // Show farmer-specific allocated share for convenience
+              allocatedShareQty: myAllocs.reduce((s, a) => s + a.allocatedQuantity, 0),
+              allocatedShareAmount: myAllocs.reduce((s, a) => s + a.totalAmount, 0),
+            };
+          }
+          return o;
+        });
     }
-    return list;
+
+    return orders;
   }
 
-  async createOrder(orderData) {
+  async getOrderById(id) {
     await this.init();
-
-    const orderId = orderData.id || orderData.orderId || 'ORD_' + Date.now().toString().slice(-6);
-    const newOrder = {
-      id: orderId,
-      orderId,
-      buyerId: orderData.buyerId || 'user_buyer',
-      buyerName: orderData.buyerName || 'Buyer',
-      buyerMobile: orderData.buyerMobile || '',
-      listingId: orderData.listingId || null,
-      crop: (orderData.crop || '').toLowerCase(),
-      quantity: parseFloat(orderData.quantity || orderData.quantityKg || 0),
-      quantityKg: parseFloat(orderData.quantity || orderData.quantityKg || 0),
-      pricePerKg: parseFloat(orderData.pricePerKg || orderData.ratePerKg || 0),
-      totalAmount: parseFloat(orderData.totalAmount || 0),
-      farmerId: orderData.farmerId || null,
-      farmerName: orderData.farmerName || null,
-      farmerMobile: orderData.farmerMobile || null,
-      fulfillmentStatus: orderData.fulfillmentStatus || 'PAYMENT_SECURED',
-      status: orderData.status || 'Payment Secured',
-      createdAt: orderData.createdAt || new Date().toISOString(),
-      updatedAt: orderData.updatedAt || new Date().toISOString(),
-    };
+    if (!id) return null;
 
     if (this.isPostgres && this.pool) {
+      const res = await this.pool.query('SELECT * FROM orders WHERE id = $1 LIMIT 1', [id]);
+      return res.rows[0] ? this.rowToOrder(res.rows[0]) : null;
+    }
+
+    return this.inMemoryOrders.find((o) => o.id === id || o.orderId === id) || null;
+  }
+
+  /**
+   * ATOMIC BFM-001 Multi-Farmer Order Allocation & Inventory Reservation.
+   * Concurrency Protection: Uses synchronized mutex to guarantee check-and-reserve is atomic.
+   */
+  async createMultiFarmerOrder({ requirement, buyerSession }) {
+    await this.init();
+    const unlock = await this.mutex.lock();
+
+    try {
+      const normReq = normalizeBuyerRequirement(requirement);
+      if (!normReq.crop || normReq.quantity <= 0) {
+        return { success: false, error: 'Valid crop and positive quantity are required.' };
+      }
+
+      // 1. Fetch live active candidate listings for this crop
+      const allListings = await this.getAllListings({ crop: normReq.crop });
+
+      // 2. Run greedy allocation plan
+      const plan = allocateMultiFarmerOrder(normReq, allListings);
+      if (!plan || plan.allocations.length === 0) {
+        return {
+          success: false,
+          error: `No eligible inventory found for ${normReq.crop} matching your specifications.`,
+          plan,
+        };
+      }
+
+      // 3. Atomically check availability and reserve quantities on all allocated listings
+      for (const alloc of plan.allocations) {
+        const listing = allListings.find((l) => l.id === alloc.listingId);
+        if (!listing) {
+          return { success: false, error: `Listing ${alloc.listingId} is no longer available.` };
+        }
+        const avail = (listing.quantity || 0) - (listing.reservedQuantity || 0);
+        if (avail < alloc.allocatedQuantity) {
+          return {
+            success: false,
+            error: `Inventory on listing ${listing.id} was recently reserved by another buyer. Please retry.`,
+          };
+        }
+      }
+
+      // 4. Commit reservations
+      for (const alloc of plan.allocations) {
+        const listing = allListings.find((l) => l.id === alloc.listingId);
+        const newReserved = (listing.reservedQuantity || 0) + alloc.allocatedQuantity;
+        await this.updateListing(listing.id, {
+          reservedQuantity: newReserved,
+          status: (listing.quantity - newReserved <= 0) ? 'Reserved' : listing.status,
+        });
+      }
+
+      // 5. Create Parent Order
+      const orderId = 'ORD_' + Date.now().toString().slice(-6) + '_' + Math.random().toString(36).substring(2, 6);
+      const parentOrder = {
+        id: orderId,
+        orderId,
+        buyerId: buyerSession?.id || 'user_buyer',
+        buyerName: buyerSession?.name || 'Verified Buyer',
+        buyerMobile: buyerSession?.mobile || '',
+        buyerLocation: normReq.buyerLocation || buyerSession?.location || '',
+        crop: normReq.crop,
+        variety: plan.variety || normReq.variety || (plan.allocations[0]?.variety || 'Regular'),
+        quantity: plan.fulfilledQuantity,
+        quantityKg: plan.fulfilledQuantity,
+        requestedQuantity: plan.requestedQuantity,
+        fulfilledQuantity: plan.fulfilledQuantity,
+        remainingQuantity: plan.remainingQuantity,
+        pricePerKg: plan.weightedAveragePrice,
+        ratePerKg: plan.weightedAveragePrice,
+        totalAmount: plan.totalAmount,
+        matchStatus: plan.matchStatus,
+        fulfillmentStatus: plan.fulfillmentStatus === 'FULFILLED' ? 'PAYMENT_SECURED' : 'PARTIAL',
+        status: plan.fulfillmentStatus === 'FULFILLED' ? 'Payment Secured' : 'Partially Fulfilled',
+        allocations: plan.allocations,
+        requirement: normReq,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+
+      if (this.isPostgres && this.pool) {
+        const client = await this.pool.connect();
+        try {
+          const q = `
+            INSERT INTO orders (
+              id, buyer_id, buyer_name, buyer_mobile, buyer_location, crop,
+              variety, quantity, requested_quantity, fulfilled_quantity,
+              remaining_quantity, price_per_kg, total_amount, fulfillment_status,
+              status, allocations, requirement, created_at, updated_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+          `;
+          await client.query(q, [
+            parentOrder.id,
+            parentOrder.buyerId,
+            parentOrder.buyerName,
+            parentOrder.buyerMobile,
+            parentOrder.buyerLocation,
+            parentOrder.crop,
+            parentOrder.variety,
+            parentOrder.quantity,
+            parentOrder.requestedQuantity,
+            parentOrder.fulfilledQuantity,
+            parentOrder.remainingQuantity,
+            parentOrder.pricePerKg,
+            parentOrder.totalAmount,
+            parentOrder.fulfillmentStatus,
+            parentOrder.status,
+            JSON.stringify(parentOrder.allocations),
+            JSON.stringify(parentOrder.requirement),
+            parentOrder.createdAt,
+            parentOrder.updatedAt,
+          ]);
+        } finally {
+          client.release();
+        }
+      } else {
+        this.inMemoryOrders.unshift(parentOrder);
+        this.saveLocalOrders();
+      }
+
+      return {
+        success: true,
+        order: parentOrder,
+        plan,
+      };
+    } finally {
+      unlock();
+    }
+  }
+
+  /**
+   * Farmer Accepts Allocated Share.
+   * Decrements physical quantity and releases reservation.
+   */
+  async acceptAllocation(allocationId, farmerId) {
+    await this.init();
+    const unlock = await this.mutex.lock();
+
+    try {
+      const orders = await this.getAllOrders();
+      const targetOrder = orders.find((o) =>
+        Array.isArray(o.allocations) && o.allocations.some((a) => a.allocationId === allocationId || a.id === allocationId)
+      );
+
+      if (!targetOrder) {
+        return { success: false, error: 'Allocation not found in any active order.' };
+      }
+
+      const alloc = targetOrder.allocations.find((a) => a.allocationId === allocationId || a.id === allocationId);
+      if (farmerId && farmerId !== 'admin' && alloc.farmerId !== farmerId) {
+        return { success: false, error: 'Unauthorized: You can only accept allocations assigned to you.' };
+      }
+
+      if (alloc.status === 'ACCEPTED') {
+        return { success: true, message: 'Allocation already accepted.', order: targetOrder, allocation: alloc };
+      }
+
+      // Mark allocation accepted
+      alloc.status = 'ACCEPTED';
+      alloc.acceptedAt = new Date().toISOString();
+
+      // Decrement listing permanently
+      const listing = await this.getListingById(alloc.listingId);
+      if (listing) {
+        const newQty = Math.max(0, (listing.quantity || 0) - alloc.allocatedQuantity);
+        const newReserved = Math.max(0, (listing.reservedQuantity || 0) - alloc.allocatedQuantity);
+        await this.updateListing(listing.id, {
+          quantity: newQty,
+          reservedQuantity: newReserved,
+          status: newQty === 0 ? 'Sold Out' : listing.status,
+        });
+      }
+
+      targetOrder.updatedAt = new Date().toISOString();
+      await this.saveUpdatedOrder(targetOrder);
+
+      return {
+        success: true,
+        message: 'Allocation accepted successfully.',
+        order: targetOrder,
+        allocation: alloc,
+      };
+    } finally {
+      unlock();
+    }
+  }
+
+  /**
+   * Farmer Rejects Allocation -> Automatic Reallocation.
+   * Releases rejected reservation and attempts to reallocate shortfall to next candidate.
+   */
+  async rejectAllocation(allocationId, farmerId) {
+    await this.init();
+    const unlock = await this.mutex.lock();
+
+    try {
+      const orders = await this.getAllOrders();
+      const targetOrder = orders.find((o) =>
+        Array.isArray(o.allocations) && o.allocations.some((a) => a.allocationId === allocationId || a.id === allocationId)
+      );
+
+      if (!targetOrder) {
+        return { success: false, error: 'Allocation not found in any active order.' };
+      }
+
+      const alloc = targetOrder.allocations.find((a) => a.allocationId === allocationId || a.id === allocationId);
+      if (farmerId && farmerId !== 'admin' && alloc.farmerId !== farmerId) {
+        return { success: false, error: 'Unauthorized: You can only reject allocations assigned to you.' };
+      }
+
+      if (alloc.status === 'REJECTED') {
+        return { success: true, message: 'Allocation already rejected.', order: targetOrder, allocation: alloc };
+      }
+
+      // 1. Mark allocation rejected
+      alloc.status = 'REJECTED';
+      alloc.rejectedAt = new Date().toISOString();
+
+      // 2. Release reserved quantity on original listing
+      const listing = await this.getListingById(alloc.listingId);
+      if (listing) {
+        const newReserved = Math.max(0, (listing.reservedQuantity || 0) - alloc.allocatedQuantity);
+        await this.updateListing(listing.id, {
+          reservedQuantity: newReserved,
+          status: listing.status === 'Reserved' ? 'Listed' : listing.status,
+        });
+      }
+
+      // 3. Reallocation attempt for the shortfall
+      const shortfall = alloc.allocatedQuantity;
+      const excludedIds = [alloc.farmerId, alloc.listingId];
+
+      const liveListings = await this.getAllListings({ crop: targetOrder.crop });
+      const reallocPlan = allocateMultiFarmerOrder(
+        {
+          ...(targetOrder.requirement || {}),
+          crop: targetOrder.crop,
+          variety: targetOrder.variety,
+          quantity: shortfall,
+          buyerLocation: targetOrder.buyerLocation,
+        },
+        liveListings,
+        excludedIds
+      );
+
+      let reallocated = false;
+      let newAllocations = [];
+
+      if (reallocPlan && reallocPlan.fulfilledQuantity > 0) {
+        reallocated = true;
+        newAllocations = reallocPlan.allocations;
+
+        // Reserve inventory for the new allocations
+        for (const newAlloc of newAllocations) {
+          const l = liveListings.find((item) => item.id === newAlloc.listingId);
+          if (l) {
+            const res = (l.reservedQuantity || 0) + newAlloc.allocatedQuantity;
+            await this.updateListing(l.id, {
+              reservedQuantity: res,
+              status: (l.quantity - res <= 0) ? 'Reserved' : l.status,
+            });
+          }
+          targetOrder.allocations.push(newAlloc);
+        }
+      }
+
+      // Recalculate parent order totals from active (non-rejected) allocations
+      const activeAllocs = targetOrder.allocations.filter((a) => a.status !== 'REJECTED');
+      const activeFulfilled = activeAllocs.reduce((s, a) => s + a.allocatedQuantity, 0);
+      const activeTotal = activeAllocs.reduce((s, a) => s + a.totalAmount, 0);
+
+      targetOrder.fulfilledQuantity = Math.round(activeFulfilled * 100) / 100;
+      targetOrder.quantity = targetOrder.fulfilledQuantity;
+      targetOrder.quantityKg = targetOrder.fulfilledQuantity;
+      targetOrder.remainingQuantity = Math.max(0, Math.round((targetOrder.requestedQuantity - targetOrder.fulfilledQuantity) * 100) / 100);
+      targetOrder.totalAmount = Math.round(activeTotal * 100) / 100;
+      targetOrder.pricePerKg = targetOrder.fulfilledQuantity > 0
+        ? Math.round((targetOrder.totalAmount / targetOrder.fulfilledQuantity) * 100) / 100
+        : targetOrder.pricePerKg;
+
+      if (targetOrder.remainingQuantity === 0) {
+        targetOrder.fulfillmentStatus = 'PAYMENT_SECURED';
+        targetOrder.status = 'Payment Secured';
+      } else {
+        targetOrder.fulfillmentStatus = 'PARTIAL';
+        targetOrder.status = 'Partially Fulfilled';
+      }
+
+      targetOrder.updatedAt = new Date().toISOString();
+      await this.saveUpdatedOrder(targetOrder);
+
+      return {
+        success: true,
+        reallocated,
+        newAllocations,
+        order: targetOrder,
+        message: reallocated
+          ? `Farmer rejected allocation; ${reallocPlan.fulfilledQuantity} kg successfully reallocated.`
+          : 'Farmer rejected allocation; no replacement supply currently available.',
+      };
+    } finally {
+      unlock();
+    }
+  }
+
+  async saveUpdatedOrder(order) {
+    if (this.isPostgres && this.pool) {
+      const q = `
+        UPDATE orders SET
+          quantity = $1,
+          requested_quantity = $2,
+          fulfilled_quantity = $3,
+          remaining_quantity = $4,
+          price_per_kg = $5,
+          total_amount = $6,
+          fulfillment_status = $7,
+          status = $8,
+          allocations = $9,
+          updated_at = $10
+        WHERE id = $11
+      `;
       const client = await this.pool.connect();
       try {
-        const q = `
-          INSERT INTO orders (
-            id, buyer_id, buyer_name, buyer_mobile, listing_id, crop,
-            quantity, price_per_kg, total_amount, farmer_id, farmer_name,
-            farmer_mobile, fulfillment_status, status, created_at, updated_at
-          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
-          ON CONFLICT (id) DO UPDATE SET
-            fulfillment_status = EXCLUDED.fulfillment_status,
-            status = EXCLUDED.status,
-            updated_at = EXCLUDED.updated_at
-        `;
         await client.query(q, [
-          newOrder.id, newOrder.buyerId, newOrder.buyerName, newOrder.buyerMobile,
-          newOrder.listingId, newOrder.crop, newOrder.quantity, newOrder.pricePerKg,
-          newOrder.totalAmount, newOrder.farmerId, newOrder.farmerName,
-          newOrder.farmerMobile, newOrder.fulfillmentStatus, newOrder.status,
-          newOrder.createdAt, newOrder.updatedAt,
+          order.quantity,
+          order.requestedQuantity,
+          order.fulfilledQuantity,
+          order.remainingQuantity,
+          order.pricePerKg,
+          order.totalAmount,
+          order.fulfillmentStatus,
+          order.status,
+          JSON.stringify(order.allocations),
+          order.updatedAt,
+          order.id,
         ]);
-        return newOrder;
       } finally {
         client.release();
       }
+    } else {
+      const idx = this.inMemoryOrders.findIndex((o) => o.id === order.id || o.orderId === order.id);
+      if (idx !== -1) {
+        this.inMemoryOrders[idx] = { ...order };
+        this.saveLocalOrders();
+      }
     }
+  }
 
-    // Local fallback
-    this.inMemoryOrders.unshift(newOrder);
-    this.saveLocalOrders();
-    return newOrder;
+  // Legacy createOrder compatibility
+  async createOrder(orderData) {
+    return this.createMultiFarmerOrder({
+      requirement: {
+        crop: orderData.crop,
+        quantity: orderData.quantity || orderData.quantityKg,
+        variety: orderData.variety,
+        maxPrice: orderData.pricePerKg,
+      },
+      buyerSession: {
+        id: orderData.buyerId,
+        name: orderData.buyerName,
+        mobile: orderData.buyerMobile,
+      },
+    }).then((res) => res.order || null);
   }
 
   async resetOrders() {
@@ -587,6 +1006,17 @@ class ListingStore {
     } else {
       this.inMemoryOrders = [];
       this.saveLocalOrders();
+    }
+    return true;
+  }
+
+  async resetSeedData() {
+    await this.init();
+    if (this.isPostgres && this.pool) {
+      await this.pool.query('DELETE FROM listings WHERE id IN ($1, $2, $3, $4)', SEED_LISTING_IDS);
+    } else {
+      this.inMemoryListings = this.inMemoryListings.filter((item) => !SEED_LISTING_IDS.includes(item.id));
+      this.saveLocalStore();
     }
     return true;
   }

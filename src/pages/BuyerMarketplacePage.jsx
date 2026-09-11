@@ -14,8 +14,8 @@ import { isEligibleForHubListing, getAggregatedCropTotal } from '../utils/aggreg
 import { ensureListingTraceabilityId, generateQrDataUrl, getTraceabilityUrl } from '../utils/traceability.js'
 import { predictCropDemand, getDemandBadgeStyle } from '../utils/demandPrediction.js'
 import { fetchListings, updateListing as apiUpdateListing } from '../utils/listingService.js'
-
-const CROP_KEYS = ['wheat', 'rice', 'potato', 'onion', 'tomato', 'fruits']
+import { CROP_KEYS, getCropVarieties } from '../utils/cropConstants.js'
+import { allocateMultiFarmerOrder } from '../utils/buyerMatching.js'
 
 function EscrowTimeline({ fulfillmentStatus, t }) {
   const steps = [
@@ -160,6 +160,7 @@ export default function BuyerMarketplacePage({ onNavigate, session }) {
   // Filter states
   const [searchQuery, setSearchQuery] = useState('')
   const [selectedCrop, setSelectedCrop] = useState('all')
+  const [selectedVariety, setSelectedVariety] = useState('all')
   const [locationFilter, setLocationFilter] = useState('')
   const [minPrice, setMinPrice] = useState('')
   const [maxPrice, setMaxPrice] = useState('')
@@ -173,10 +174,48 @@ export default function BuyerMarketplacePage({ onNavigate, session }) {
   const [orderSuccess, setOrderSuccess] = useState(null)
   const [isPlacingOrder, setIsPlacingOrder] = useState(false)
 
+  // Multi-Farmer Order Allocation states (BFM-001)
+  const [showMultiFarmerModal, setShowMultiFarmerModal] = useState(false)
+  const [multiCrop, setMultiCrop] = useState(CROP_KEYS[0] || 'wheat')
+  const [multiVariety, setMultiVariety] = useState('Any')
+  const [multiQuantity, setMultiQuantity] = useState('500')
+  const [multiMinGrade, setMultiMinGrade] = useState('Any')
+  const [multiMaxPrice, setMultiMaxPrice] = useState('')
+  const [multiMaxDistance, setMultiMaxDistance] = useState('')
+  const [multiPlan, setMultiPlan] = useState(null)
+  const [isMatching, setIsMatching] = useState(false)
+  const [isAllocatingOrder, setIsAllocatingOrder] = useState(false)
+  const [multiOrderError, setMultiOrderError] = useState('')
+
   // Orders for current unified user
   const [buyerOrders, setBuyerOrders] = useState(() => {
     return session?.id ? getUserOrders(session.id, session.mobile) : []
   })
+
+  const refreshBuyerOrders = async () => {
+    if (!session?.id) return
+    const local = getUserOrders(session.id, session.mobile) || []
+    try {
+      const res = await fetch(`/api/orders?buyerId=${encodeURIComponent(session.id)}`)
+      if (res.ok) {
+        const data = await res.json()
+        const serverOrders = data.orders || (Array.isArray(data) ? data : [])
+        if (Array.isArray(serverOrders) && serverOrders.length > 0) {
+          const serverIds = new Set(serverOrders.map((o) => o.id || o.orderId))
+          const filteredLocal = local.filter((o) => !serverIds.has(o.id || o.orderId))
+          setBuyerOrders([...serverOrders, ...filteredLocal])
+          return
+        }
+      }
+    } catch (e) {
+      console.warn('Could not fetch server orders for buyer:', e)
+    }
+    setBuyerOrders(local)
+  }
+
+  useEffect(() => {
+    refreshBuyerOrders()
+  }, [session])
 
   // Filtered produce listings
   const filteredListings = useMemo(() => {
@@ -187,6 +226,12 @@ export default function BuyerMarketplacePage({ onNavigate, session }) {
       // Crop filter
       if (selectedCrop !== 'all' && item.crop !== selectedCrop) {
         return false
+      }
+
+      // Variety filter
+      if (selectedCrop !== 'all' && selectedVariety !== 'all') {
+        const itemVar = item.variety || 'Regular'
+        if (itemVar !== selectedVariety) return false
       }
 
       // Location filter
@@ -217,16 +262,103 @@ export default function BuyerMarketplacePage({ onNavigate, session }) {
 
       return true
     })
-  }, [listings, selectedCrop, locationFilter, minPrice, maxPrice, minQuantity, searchQuery, farmerPortalT.crops])
+  }, [listings, selectedCrop, selectedVariety, locationFilter, minPrice, maxPrice, minQuantity, searchQuery, farmerPortalT.crops])
 
   // Reset filters
   const handleResetFilters = () => {
     setSearchQuery('')
     setSelectedCrop('all')
+    setSelectedVariety('all')
     setLocationFilter('')
     setMinPrice('')
     setMaxPrice('')
     setMinQuantity('')
+  }
+
+  // Multi-farmer match preview
+  const handlePreviewMatch = async () => {
+    setMultiOrderError('')
+    const qty = parseFloat(multiQuantity)
+    if (!multiQuantity || isNaN(qty) || qty <= 0) {
+      setMultiOrderError(lang === 'hi' ? 'कृपया मान्य मात्रा दर्ज करें' : 'Please enter a valid quantity')
+      return
+    }
+    setIsMatching(true)
+    const reqPayload = {
+      crop: multiCrop,
+      variety: multiVariety === 'Any' ? null : multiVariety,
+      quantity: qty,
+      minGrade: multiMinGrade === 'Any' ? null : multiMinGrade,
+      maxPrice: multiMaxPrice ? parseFloat(multiMaxPrice) : null,
+      maxDistanceKm: multiMaxDistance ? parseFloat(multiMaxDistance) : null,
+      buyerLocation: session?.location || 'Central Mandi',
+    }
+    try {
+      const res = await fetch('/api/match', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ requirement: reqPayload }),
+      })
+      if (res.ok) {
+        const data = await res.json()
+        if (data.plan) {
+          setMultiPlan(data.plan)
+          setIsMatching(false)
+          return
+        }
+      }
+    } catch (e) {
+      console.warn('Server match fallback:', e)
+    }
+    const plan = allocateMultiFarmerOrder(reqPayload, listings)
+    setMultiPlan(plan)
+    setIsMatching(false)
+  }
+
+  // Multi-farmer order execution
+  const handleConfirmMultiFarmerOrder = async () => {
+    setMultiOrderError('')
+    const qty = parseFloat(multiQuantity)
+    if (!multiQuantity || isNaN(qty) || qty <= 0) {
+      setMultiOrderError(lang === 'hi' ? 'कृपया मान्य मात्रा दर्ज करें' : 'Please enter a valid quantity')
+      return
+    }
+    setIsAllocatingOrder(true)
+    const reqPayload = {
+      crop: multiCrop,
+      variety: multiVariety === 'Any' ? null : multiVariety,
+      quantity: qty,
+      minGrade: multiMinGrade === 'Any' ? null : multiMinGrade,
+      maxPrice: multiMaxPrice ? parseFloat(multiMaxPrice) : null,
+      maxDistanceKm: multiMaxDistance ? parseFloat(multiMaxDistance) : null,
+      buyerLocation: session?.location || 'Central Mandi',
+      buyerId: session?.id || 'demo_buyer',
+      buyerName: session?.name || 'Bulk Buyer',
+      buyerMobile: session?.mobile || '',
+    }
+    try {
+      const res = await fetch('/api/orders/allocate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ requirement: reqPayload }),
+      })
+      const data = await res.json()
+      if (res.ok && data.success) {
+        setShowMultiFarmerModal(false)
+        setOrderSuccess(data.order)
+        setMultiPlan(null)
+        await refreshListings()
+        await refreshBuyerOrders()
+        setActiveTab('my-orders')
+      } else {
+        setMultiOrderError(data.error || 'Failed to allocate order')
+      }
+    } catch (e) {
+      console.error(e)
+      setMultiOrderError('Network error while placing multi-farmer order')
+    } finally {
+      setIsAllocatingOrder(false)
+    }
   }
 
   // Open Order Modal
@@ -448,7 +580,10 @@ export default function BuyerMarketplacePage({ onNavigate, session }) {
                   <select
                     className="filter-select"
                     value={selectedCrop}
-                    onChange={(e) => setSelectedCrop(e.target.value)}
+                    onChange={(e) => {
+                      setSelectedCrop(e.target.value)
+                      setSelectedVariety('all')
+                    }}
                   >
                     <option value="all">{mktT.allCrops}</option>
                     {CROP_KEYS.map((key) => (
@@ -458,6 +593,25 @@ export default function BuyerMarketplacePage({ onNavigate, session }) {
                     ))}
                   </select>
                 </div>
+
+                {/* Variety Filter (BFM-001) */}
+                {selectedCrop !== 'all' && (
+                  <div className="filter-item">
+                    <label className="filter-label">{farmerPortalT.varietyLabel || 'Variety'}</label>
+                    <select
+                      className="filter-select"
+                      value={selectedVariety}
+                      onChange={(e) => setSelectedVariety(e.target.value)}
+                    >
+                      <option value="all">{lang === 'hi' ? 'सभी किस्में' : 'All Varieties'}</option>
+                      {getCropVarieties(selectedCrop).map((v) => (
+                        <option key={v} value={v}>
+                          {farmerPortalT.varieties?.[v] || v}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
 
                 {/* Location Filter */}
                 <div className="filter-item">
@@ -514,10 +668,22 @@ export default function BuyerMarketplacePage({ onNavigate, session }) {
 
             {/* Produce Grid */}
             <div className="produce-catalog-section">
-              <div className="catalog-meta-row">
+              <div className="catalog-meta-row" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px' }}>
                 <span className="results-count">
                   <strong>{filteredListings.length}</strong> {mktT.availableListingsCount}
                 </span>
+                <button
+                  type="button"
+                  className="btn btn-primary btn-multi-farmer-cta"
+                  style={{ background: 'linear-gradient(135deg, #15803d, #0d9488)', border: 'none', padding: '8px 16px', fontWeight: 'bold' }}
+                  onClick={() => {
+                    setShowMultiFarmerModal(true)
+                    setMultiOrderError('')
+                    setMultiPlan(null)
+                  }}
+                >
+                  ⚡ {lang === 'hi' ? 'स्मार्ट मल्टी-फार्मर आवंटन ऑर्डर' : '⚡ Smart Multi-Farmer Bulk Order'}
+                </button>
               </div>
 
               {listings.length === 0 ? (
@@ -573,8 +739,15 @@ export default function BuyerMarketplacePage({ onNavigate, session }) {
                         )}
 
                         <div className="produce-card-body">
-                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
-                            <h3 className="produce-title" style={{ margin: 0 }}>{cropName}</h3>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px', flexWrap: 'wrap', gap: '4px' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
+                              <h3 className="produce-title" style={{ margin: 0 }}>{cropName}</h3>
+                              {item.variety && (
+                                <span style={{ background: '#f0fdf4', color: '#166534', border: '1px solid #bbf7d0', padding: '1px 6px', borderRadius: '4px', fontSize: '0.74rem', fontWeight: '600' }}>
+                                  🌾 {farmerPortalT.varieties?.[item.variety] || item.variety}
+                                </span>
+                              )}
+                            </div>
                             {item.traceabilityId && (
                               <span className="traceability-card-chip" title="Traceability ID">
                                 🏷️ <code>{item.traceabilityId}</code>
@@ -836,10 +1009,43 @@ export default function BuyerMarketplacePage({ onNavigate, session }) {
                           </div>
                         </div>
 
-                        <div className="order-footer-loc">
-                          <IconPin width="14" height="14" />
-                          <span>{mktT.orderLocation}: <strong>{order.farmerLocation}</strong></span>
-                        </div>
+                        {order.farmerLocation && (
+                          <div className="order-footer-loc">
+                            <IconPin width="14" height="14" />
+                            <span>{mktT.orderLocation}: <strong>{order.farmerLocation}</strong></span>
+                          </div>
+                        )}
+
+                        {/* Child Allocations Breakdown for Multi-Farmer Orders (BFM-001) */}
+                        {Array.isArray(order.allocations) && order.allocations.length > 0 && (
+                          <div style={{ marginTop: '12px', padding: '10px', background: '#f8fafc', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
+                            <div style={{ fontWeight: '600', fontSize: '0.85rem', color: '#166534', marginBottom: '8px' }}>
+                              🌾 Multi-Farmer Allocation Breakdown ({order.allocations.length} Farmers)
+                            </div>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                              {order.allocations.map((alloc) => (
+                                <div key={alloc.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: '#ffffff', padding: '6px 10px', borderRadius: '6px', border: '1px solid #e2e8f0', fontSize: '0.8rem', flexWrap: 'wrap', gap: '6px' }}>
+                                  <div>
+                                    <strong>{alloc.farmerName || 'Farmer'}</strong> {alloc.farmerLocation ? `(${alloc.farmerLocation})` : ''} • {alloc.allocatedQuantity} kg @ ₹{alloc.unitPrice}/kg
+                                    {alloc.variety && <span style={{ marginLeft: '6px', color: '#64748b' }}>({alloc.variety})</span>}
+                                  </div>
+                                  <div>
+                                    <span style={{
+                                      padding: '2px 8px',
+                                      borderRadius: '10px',
+                                      fontSize: '0.75rem',
+                                      fontWeight: 'bold',
+                                      background: alloc.status === 'ACCEPTED' ? '#dcfce7' : alloc.status === 'REJECTED' ? '#fee2e2' : '#fef9c3',
+                                      color: alloc.status === 'ACCEPTED' ? '#15803d' : alloc.status === 'REJECTED' ? '#b91c1c' : '#854d0e',
+                                    }}>
+                                      ● {alloc.status}
+                                    </span>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
 
                         {/* Order Traceability Actions */}
                         <div className="order-tr-row" style={{ marginTop: '10px', paddingTop: '10px', borderTop: '1px dashed var(--border-light)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '8px' }}>
@@ -1337,6 +1543,264 @@ export default function BuyerMarketplacePage({ onNavigate, session }) {
                   }}
                 >
                   {trT.viewTimeline || 'Open Public Journey Page'} →
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ======================================================== */}
+      {/* MODAL 4: SMART MULTI-FARMER ORDER ALLOCATION MODAL (BFM-001) */}
+      {/* ======================================================== */}
+      {showMultiFarmerModal && (
+        <div className="modal-backdrop" onClick={() => setShowMultiFarmerModal(false)}>
+          <div
+            className="modal-card"
+            role="dialog"
+            style={{ maxWidth: '780px', width: '95%', maxHeight: '90vh', overflowY: 'auto' }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="modal-detail-header">
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <span style={{ fontSize: '1.4rem' }}>⚡</span>
+                <div>
+                  <h3 style={{ margin: 0, fontSize: '1.2rem' }}>
+                    {lang === 'hi' ? 'स्मार्ट मल्टी-फार्मर आवंटन इंजन' : 'Smart Multi-Farmer Allocation Engine'}
+                  </h3>
+                  <span style={{ fontSize: '0.82rem', color: 'var(--text-muted)' }}>
+                    {lang === 'hi'
+                      ? 'एकल ऑर्डर में कई सत्यापित किसानों से थोक उपज की स्वचालित पूर्ति एवं पारदर्शी आवंटन।'
+                      : 'Aggregate bulk volume across multiple verified farmers in a single transaction.'}
+                  </span>
+                </div>
+              </div>
+              <button type="button" className="modal-close-icon" onClick={() => setShowMultiFarmerModal(false)}>×</button>
+            </div>
+
+            <div style={{ padding: '20px' }}>
+              {/* Form Controls */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '14px', marginBottom: '16px' }}>
+                <div>
+                  <label className="form-label">{farmerPortalT.cropLabel} *</label>
+                  <select
+                    className="form-input form-select"
+                    value={multiCrop}
+                    onChange={(e) => {
+                      setMultiCrop(e.target.value)
+                      setMultiVariety('Any')
+                      setMultiPlan(null)
+                    }}
+                  >
+                    {CROP_KEYS.map((k) => (
+                      <option key={k} value={k}>
+                        {farmerPortalT.crops[k]}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="form-label">{farmerPortalT.varietyLabel || 'Variety'}</label>
+                  <select
+                    className="form-input form-select"
+                    value={multiVariety}
+                    onChange={(e) => {
+                      setMultiVariety(e.target.value)
+                      setMultiPlan(null)
+                    }}
+                  >
+                    <option value="Any">{lang === 'hi' ? 'कोई भी किस्म (Any)' : 'Any Variety'}</option>
+                    {getCropVarieties(multiCrop).map((v) => (
+                      <option key={v} value={v}>
+                        {farmerPortalT.varieties?.[v] || v}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="form-label">{mktT.orderQuantityLabel} (kg) *</label>
+                  <input
+                    type="number"
+                    min="1"
+                    className="form-input"
+                    value={multiQuantity}
+                    onChange={(e) => {
+                      setMultiQuantity(e.target.value)
+                      setMultiPlan(null)
+                    }}
+                    placeholder="e.g. 500"
+                  />
+                </div>
+
+                <div>
+                  <label className="form-label">{lang === 'hi' ? 'न्यूनतम गुणवत्ता (Min Grade)' : 'Minimum Grade'}</label>
+                  <select
+                    className="form-input form-select"
+                    value={multiMinGrade}
+                    onChange={(e) => {
+                      setMultiMinGrade(e.target.value)
+                      setMultiPlan(null)
+                    }}
+                  >
+                    <option value="Any">{lang === 'hi' ? 'कोई भी (Any Grade)' : 'Any Grade (A, B, C)'}</option>
+                    <option value="A">{lang === 'hi' ? 'केवल ग्रेड A (Grade A Only)' : 'Grade A Only'}</option>
+                    <option value="B">{lang === 'hi' ? 'ग्रेड B या बेहतर (Grade B+)' : 'Grade B or higher (A, B)'}</option>
+                    <option value="C">{lang === 'hi' ? 'ग्रेड C या बेहतर (Grade C+)' : 'Grade C or higher'}</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="form-label">{mktT.filterMaxPrice} (₹/kg)</label>
+                  <input
+                    type="number"
+                    min="1"
+                    className="form-input"
+                    value={multiMaxPrice}
+                    onChange={(e) => {
+                      setMultiMaxPrice(e.target.value)
+                      setMultiPlan(null)
+                    }}
+                    placeholder={lang === 'hi' ? 'वैकल्पिक अधिकतम मूल्य' : 'Optional budget cap'}
+                  />
+                </div>
+
+                <div>
+                  <label className="form-label">{lang === 'hi' ? 'अधिकतम दूरी (कि.मी.)' : 'Max Distance (km)'}</label>
+                  <input
+                    type="number"
+                    min="1"
+                    className="form-input"
+                    value={multiMaxDistance}
+                    onChange={(e) => {
+                      setMultiMaxDistance(e.target.value)
+                      setMultiPlan(null)
+                    }}
+                    placeholder={lang === 'hi' ? 'वैकल्पिक दूरी' : 'Optional radius in km'}
+                  />
+                </div>
+              </div>
+
+              {/* Action Button: Preview Match */}
+              <div style={{ display: 'flex', gap: '10px', alignItems: 'center', marginBottom: '16px' }}>
+                <button
+                  type="button"
+                  className="btn btn-outline"
+                  onClick={handlePreviewMatch}
+                  disabled={isMatching}
+                  style={{ fontWeight: '600' }}
+                >
+                  {isMatching
+                    ? (lang === 'hi' ? 'आवंटन योजना की गणना जारी...' : 'Calculating Matching Plan...')
+                    : (lang === 'hi' ? '🔍 आवंटन योजना का पूर्वावलोकन देखें' : '🔍 Preview Multi-Farmer Allocation')}
+                </button>
+              </div>
+
+              {multiOrderError && (
+                <div style={{ padding: '10px 14px', background: '#fee2e2', color: '#b91c1c', borderRadius: '6px', marginBottom: '14px', fontSize: '0.88rem' }}>
+                  ⚠️ {multiOrderError}
+                </div>
+              )}
+
+              {/* Allocation Preview Results */}
+              {multiPlan && (
+                <div style={{ border: '1px solid #e2e8f0', borderRadius: '8px', padding: '16px', background: '#f8fafc', marginBottom: '16px' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px', flexWrap: 'wrap', gap: '8px' }}>
+                    <h4 style={{ margin: 0, fontSize: '1rem', color: '#166534' }}>
+                      ⚡ {lang === 'hi' ? 'प्रस्तावित बहु-किसान आवंटन विवरण' : 'Proposed Multi-Farmer Allocation Plan'}
+                    </h4>
+                    <span style={{
+                      padding: '3px 10px',
+                      borderRadius: '12px',
+                      fontSize: '0.8rem',
+                      fontWeight: 'bold',
+                      background: multiPlan.matchStatus === 'FULL' ? '#dcfce7' : multiPlan.matchStatus === 'PARTIAL' ? '#fef9c3' : '#fee2e2',
+                      color: multiPlan.matchStatus === 'FULL' ? '#15803d' : multiPlan.matchStatus === 'PARTIAL' ? '#854d0e' : '#b91c1c',
+                    }}>
+                      ● {multiPlan.matchStatus === 'FULL' ? (lang === 'hi' ? '100% मांग पूरी हुई' : '100% Demand Fulfilled') : multiPlan.matchStatus === 'PARTIAL' ? (lang === 'hi' ? 'आंशिक पूर्ति' : 'Partial Fulfillment') : (lang === 'hi' ? 'कोई किसान पात्र नहीं' : 'No Eligible Farmers')}
+                    </span>
+                  </div>
+
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '10px', marginBottom: '14px' }}>
+                    <div style={{ background: '#fff', padding: '10px', borderRadius: '6px', border: '1px solid #e2e8f0' }}>
+                      <span style={{ fontSize: '0.75rem', color: '#64748b', display: 'block' }}>{lang === 'hi' ? 'मांग पूर्ति' : 'Fulfilled / Requested'}</span>
+                      <strong style={{ fontSize: '1rem' }}>{multiPlan.fulfilledQuantity} / {multiPlan.requestedQuantity} kg</strong>
+                    </div>
+                    <div style={{ background: '#fff', padding: '10px', borderRadius: '6px', border: '1px solid #e2e8f0' }}>
+                      <span style={{ fontSize: '0.75rem', color: '#64748b', display: 'block' }}>{lang === 'hi' ? 'भारित औसत मूल्य' : 'Weighted Avg Rate'}</span>
+                      <strong style={{ fontSize: '1rem', color: '#16a34a' }}>₹{multiPlan.weightedAveragePrice} / kg</strong>
+                    </div>
+                    <div style={{ background: '#fff', padding: '10px', borderRadius: '6px', border: '1px solid #e2e8f0' }}>
+                      <span style={{ fontSize: '0.75rem', color: '#64748b', display: 'block' }}>{lang === 'hi' ? 'कुल अनुमानित लागत' : 'Total Estimated Cost'}</span>
+                      <strong style={{ fontSize: '1rem' }}>₹{multiPlan.totalEstimatedCost.toLocaleString('en-IN')}</strong>
+                    </div>
+                    <div style={{ background: '#fff', padding: '10px', borderRadius: '6px', border: '1px solid #e2e8f0' }}>
+                      <span style={{ fontSize: '0.75rem', color: '#64748b', display: 'block' }}>{lang === 'hi' ? 'आवंटित किसान' : 'Farmers Allocated'}</span>
+                      <strong style={{ fontSize: '1rem' }}>{multiPlan.allocations?.length || 0}</strong>
+                    </div>
+                  </div>
+
+                  {multiPlan.reason && (
+                    <div style={{ fontSize: '0.82rem', color: '#475569', marginBottom: '12px' }}>
+                      ℹ️ {multiPlan.reason}
+                    </div>
+                  )}
+
+                  {/* List of allocated farmers */}
+                  {multiPlan.allocations && multiPlan.allocations.length > 0 && (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                      {multiPlan.allocations.map((a, idx) => (
+                        <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: '#fff', padding: '8px 12px', borderRadius: '6px', border: '1px solid #e2e8f0', fontSize: '0.82rem', flexWrap: 'wrap', gap: '6px' }}>
+                          <div>
+                            <strong>Farmer #{idx + 1}: {a.farmerName || 'Farmer'}</strong> {a.farmerLocation ? `(${a.farmerLocation})` : ''}
+                            <div style={{ fontSize: '0.75rem', color: '#64748b' }}>
+                              Variety: {a.variety || 'Regular'} • Grade {a.grade} ({a.qualityScore}/100) • {a.distanceKm} km away • Score: {a.matchScore}/100
+                            </div>
+                          </div>
+                          <div style={{ textAlign: 'right' }}>
+                            <strong style={{ color: '#166534', fontSize: '0.9rem' }}>{a.allocatedQuantity} kg</strong>
+                            <div style={{ fontSize: '0.75rem', color: '#64748b' }}>@ ₹{a.unitPrice}/kg (₹{Math.round(a.allocatedQuantity * a.unitPrice).toLocaleString('en-IN')})</div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Escrow note */}
+              <div className="escrow-modal-notice" style={{ marginBottom: '16px' }}>
+                <span className="escrow-notice-icon">🔒</span>
+                <div>
+                  <strong>{escrowT.simulatedEscrow || 'Simulated Escrow'}:</strong>{' '}
+                  <span>
+                    {lang === 'hi'
+                      ? 'आवंटित कुल राशि सुरक्षित एस्क्रो में जमा होगी और प्रत्येक किसान को डिलीवरी सत्यापन के बाद ही रिलीज की जाएगी।'
+                      : 'Total order funds are held securely in demo escrow and released to each farmer upon successful delivery verification.'}
+                  </span>
+                </div>
+              </div>
+
+              {/* Modal Actions Footer */}
+              <div className="modal-actions-footer" style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px' }}>
+                <button
+                  type="button"
+                  className="btn btn-outline"
+                  onClick={() => setShowMultiFarmerModal(false)}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={handleConfirmMultiFarmerOrder}
+                  disabled={isAllocatingOrder || !multiPlan || multiPlan.fulfilledQuantity <= 0}
+                  style={{ background: '#16a34a', borderColor: '#16a34a' }}
+                >
+                  {isAllocatingOrder
+                    ? (lang === 'hi' ? 'ऑर्डर आवंटित हो रहा है...' : 'Allocating Order...')
+                    : (lang === 'hi' ? 'ऑर्डर की पुष्टि करें और भुगतान सुरक्षित करें' : 'Confirm Order & Secure Payment')}
                 </button>
               </div>
             </div>

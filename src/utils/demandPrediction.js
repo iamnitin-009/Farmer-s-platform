@@ -5,71 +5,27 @@
 export const BUYER_ORDERS_STORAGE_KEY = 'sih_buyer_orders'
 export const FARMER_LISTINGS_STORAGE_KEY = 'sih_farmer_listings'
 
-export const SUPPORTED_CROPS = ['Wheat', 'Rice', 'Potato', 'Onion', 'Tomato', 'Fruits']
+import {
+  CROP_KEYS,
+  CROP_7DAY_BASELINE_DEMAND as CANONICAL_BASELINE,
+  CROP_ALIASES as CANONICAL_ALIASES,
+  normalizeCropKey as canonicalNormalize,
+} from './cropConstants.js'
 
-// ============================================================================
-// DEMO/BASELINE VALUES: Realistic 7-day regional demand benchmarks (in kg)
-// for Indian agricultural mandis and local collection hubs.
-// Used as fallback when real platform order history is zero or too small.
-// ============================================================================
-export const CROP_7DAY_BASELINE_DEMAND = {
-  wheat: 1200,   // High-volume staple grain (~12 quintals per hub/week)
-  rice: 1000,    // Primary staple cereal (~10 quintals per hub/week)
-  potato: 750,   // High-consumption tuber staple (~7.5 quintals per hub/week)
-  onion: 600,    // High daily turnover vegetable (~6 quintals per hub/week)
-  tomato: 450,   // Perishable vegetable with continuous daily replenishment (~4.5 quintals per hub/week)
-  fruits: 350,   // Perishable mixed seasonal fruits (~3.5 quintals per hub/week)
-}
+export const SUPPORTED_CROPS = ['Rice', 'Wheat', 'Chana Dal', 'Toor Dal']
 
-// Backward-compatibility alias
+export const CROP_7DAY_BASELINE_DEMAND = CANONICAL_BASELINE
 export const CROP_BASELINE_DEMAND = CROP_7DAY_BASELINE_DEMAND
+export const CROP_ALIASES = CANONICAL_ALIASES
 
-/**
- * Crop key alias dictionary supporting English and Hindi variants
- */
-const CROP_ALIASES = {
-  wheat: 'wheat',
-  gehu: 'wheat',
-  'गेहूं': 'wheat',
-  'गेहू': 'wheat',
-  rice: 'rice',
-  chawal: 'rice',
-  paddy: 'rice',
-  'चावल': 'rice',
-  potato: 'potato',
-  aloo: 'potato',
-  alu: 'potato',
-  'आलू': 'potato',
-  onion: 'onion',
-  pyaz: 'onion',
-  pyaaz: 'onion',
-  'प्याज': 'onion',
-  tomato: 'tomato',
-  tamatar: 'tomato',
-  'टमाटर': 'tomato',
-  fruits: 'fruits',
-  fruit: 'fruits',
-  fal: 'fruits',
-  'फल': 'fruits',
-}
-
-const CROP_DISPLAY_NAMES = {
-  wheat: 'Wheat',
+export const CROP_DISPLAY_NAMES = {
   rice: 'Rice',
-  potato: 'Potato',
-  onion: 'Onion',
-  tomato: 'Tomato',
-  fruits: 'Fruits',
+  wheat: 'Wheat',
+  chana_dal: 'Chana Dal',
+  toor_dal: 'Toor Dal',
 }
 
-/**
- * Safely normalize crop input to standard supported crop key
- */
-export function normalizeCropKey(crop) {
-  if (!crop || typeof crop !== 'string') return null
-  const cleaned = crop.toLowerCase().trim()
-  return CROP_ALIASES[cleaned] || null
-}
+export const normalizeCropKey = canonicalNormalize
 
 /**
  * Defensively extracts orders from localStorage or passed collection

@@ -422,7 +422,7 @@ export default function AdminDashboardPage({ onNavigate, onLogout }) {
                     <span className="pulse-indicator online" />
                     <div>
                       <strong>Predictive Crop Demand Engine</strong>
-                      <div className="pulse-detail">Crops Tracked: Wheat, Rice, Potato, Onion, Tomato, Fruits</div>
+                      <div className="pulse-detail">Crops Tracked: Rice, Wheat, Chana Dal, Toor Dal</div>
                     </div>
                   </div>
                 </div>
@@ -577,12 +577,10 @@ export default function AdminDashboardPage({ onNavigate, onLogout }) {
                   onChange={(e) => setListingCropFilter(e.target.value)}
                 >
                   <option value="all">All Crops</option>
-                  <option value="wheat">Wheat</option>
                   <option value="rice">Rice</option>
-                  <option value="potato">Potato</option>
-                  <option value="onion">Onion</option>
-                  <option value="tomato">Tomato</option>
-                  <option value="fruits">Fruits</option>
+                  <option value="wheat">Wheat</option>
+                  <option value="chana_dal">Chana Dal</option>
+                  <option value="toor_dal">Toor Dal</option>
                 </select>
               </div>
 

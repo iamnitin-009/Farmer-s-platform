@@ -8,15 +8,7 @@ import {
   saveOptimizedRoute,
 } from '../utils/routeOptimization.js'
 import { IconPin } from '../components/Icons.jsx'
-
-const CROP_ICONS = {
-  tomato: '🍅',
-  wheat: '🌾',
-  rice: '🍚',
-  potato: '🥔',
-  onion: '🧅',
-  fruits: '🍎',
-}
+import { CROP_KEYS, CROP_ICONS } from '../utils/cropConstants.js'
 
 export default function LogisticsRoutePage({ _session, onNavigate }) {
   const { t, lang } = useLanguage()
@@ -210,7 +202,7 @@ export default function LogisticsRoutePage({ _session, onNavigate }) {
           <div className="control-group">
             <label className="control-label">{routeT.selectLot || 'Select Aggregated Hub Lot'}:</label>
             <div className="logistics-crop-pills">
-              {['tomato', 'wheat', 'rice', 'potato', 'onion', 'fruits'].map((ck) => {
+              {CROP_KEYS.map((ck) => {
                 const isSelected = selectedCrop === ck
                 const hasLot = hubAggregations[ck]?.totalQuantityKg > 0
                 return (

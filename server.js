@@ -11,9 +11,15 @@ import {
   calculate7DayDemand,
   calculateAllCropsDemand,
   getTopDemandedCropsList,
-  normalizeCropKey,
   CROP_7DAY_BASELINE_DEMAND,
 } from './server/demandPredictor.js';
+import {
+  CROP_KEYS,
+  isValidCrop,
+  normalizeCropKey,
+  CROP_VARIETIES,
+} from './server/cropConstants.js';
+import { allocateMultiFarmerOrder } from './server/matchingEngine.js';
 
 dotenv.config();
 const __filename = fileURLToPath(import.meta.url);
@@ -32,8 +38,8 @@ const GROQ_VISION_MODEL_ID = process.env.GROQ_VISION_MODEL_ID || 'qwen/qwen3.6-2
 // Limit JSON body payload size (supports base64 image up to 8MB decoded / ~11MB base64)
 app.use(express.json({ limit: '15mb' }));
 
-const SUPPORTED_CROPS = ['wheat', 'rice', 'potato', 'onion', 'tomato', 'fruits'];
-const SUPPORTED_FRUITS = ['apple', 'mango', 'banana', 'orange', 'grapes', 'guava', 'papaya'];
+const SUPPORTED_CROPS = CROP_KEYS;
+const SUPPORTED_FRUITS = [];
 
 // Deterministic grading thresholds
 const GRADE_A_MIN = 90;
@@ -145,10 +151,12 @@ app.post('/api/listings', async (req, res) => {
       fairPrice,
       pickupDecision,
       traceabilityId,
+      variety,
       id,
     } = req.body;
 
-    if (!crop || !SUPPORTED_CROPS.includes(crop.toLowerCase())) {
+    const normalizedCrop = normalizeCropKey(crop);
+    if (!normalizedCrop) {
       return res.status(400).json({
         success: false,
         error: `Invalid or missing crop. Must be one of: ${SUPPORTED_CROPS.join(', ')}`,
@@ -174,7 +182,8 @@ app.post('/api/listings', async (req, res) => {
       farmerId: user.id || req.body.farmerId || 'demo_farmer',
       farmerName: user.name || req.body.farmerName || 'Farmer',
       farmerMobile: user.mobile || req.body.farmerMobile || '',
-      crop: crop.toLowerCase(),
+      crop: normalizedCrop,
+      variety: variety || null,
       quantity: numQty,
       price: numPrice,
       location: String(location).trim(),
@@ -353,11 +362,89 @@ app.get('/api/demand-prediction', async (req, res) => {
 });
 
 // -------------------------------------------------------------
-// Orders API (Shared Marketplace Orders)
+// Orders API & BFM-001 Allocation Engine
 // -------------------------------------------------------------
+
+// Match preview endpoint (calculates greedy multi-farmer plan without reserving)
+app.post('/api/match', async (req, res) => {
+  try {
+    const requirement = req.body.requirement || req.body;
+    const crop = normalizeCropKey(requirement.crop || requirement.product);
+    if (!crop) {
+      return res.status(400).json({ success: false, error: 'Valid crop is required' });
+    }
+    const listings = await listingStore.getAllListings({ crop });
+    const plan = allocateMultiFarmerOrder(requirement, listings);
+    res.json({ success: true, plan });
+  } catch (err) {
+    console.error('[Error] POST /api/match failure:', err);
+    res.status(500).json({ success: false, error: 'Matching calculation failed' });
+  }
+});
+
+// Atomic multi-farmer order allocation & inventory reservation endpoint
+app.post('/api/orders/allocate', async (req, res) => {
+  try {
+    const user = getReqUser(req);
+    const requirement = req.body.requirement || req.body;
+    if (!requirement) {
+      return res.status(400).json({ success: false, error: 'Requirement payload is required' });
+    }
+    const result = await listingStore.createMultiFarmerOrder({
+      requirement,
+      buyerSession: user,
+    });
+    if (!result.success) {
+      return res.status(400).json(result);
+    }
+    res.status(201).json(result);
+  } catch (err) {
+    console.error('[Error] POST /api/orders/allocate failure:', err);
+    res.status(500).json({ success: false, error: err.message || 'Order allocation failed' });
+  }
+});
+
+// Farmer accepts allocation
+app.post('/api/allocations/:id/accept', async (req, res) => {
+  try {
+    const user = getReqUser(req);
+    const result = await listingStore.acceptAllocation(req.params.id, user.id);
+    if (!result.success) {
+      return res.status(400).json(result);
+    }
+    res.json(result);
+  } catch (err) {
+    console.error('[Error] POST /api/allocations/:id/accept failure:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Farmer rejects allocation -> automatic reallocation
+app.post('/api/allocations/:id/reject', async (req, res) => {
+  try {
+    const user = getReqUser(req);
+    const result = await listingStore.rejectAllocation(req.params.id, user.id);
+    if (!result.success) {
+      return res.status(400).json(result);
+    }
+    res.json(result);
+  } catch (err) {
+    console.error('[Error] POST /api/allocations/:id/reject failure:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 app.get('/api/orders', async (req, res) => {
   try {
-    const orders = await listingStore.getAllOrders(req.query);
+    const user = getReqUser(req);
+    const query = { ...req.query };
+    if (!query.buyerId && user.role === 'buyer' && user.id) {
+      query.buyerId = user.id;
+    }
+    if (!query.farmerId && user.role === 'farmer' && user.id) {
+      query.farmerId = user.id;
+    }
+    const orders = await listingStore.getAllOrders(query);
     res.json({ success: true, count: orders.length, orders });
   } catch (err) {
     console.error('[Error] GET /api/orders failure:', err);
@@ -367,8 +454,22 @@ app.get('/api/orders', async (req, res) => {
 
 app.post('/api/orders', async (req, res) => {
   try {
-    const newOrder = await listingStore.createOrder(req.body);
-    res.status(201).json({ success: true, order: newOrder });
+    const user = getReqUser(req);
+    const requirement = {
+      crop: req.body.crop,
+      quantity: req.body.quantity || req.body.quantityKg,
+      variety: req.body.variety,
+      maxPrice: req.body.pricePerKg,
+      buyerLocation: req.body.buyerLocation || user.location,
+    };
+    const result = await listingStore.createMultiFarmerOrder({
+      requirement,
+      buyerSession: user,
+    });
+    if (!result.success) {
+      return res.status(400).json(result);
+    }
+    res.status(201).json({ success: true, order: result.order });
   } catch (err) {
     console.error('[Error] POST /api/orders failure:', err);
     res.status(500).json({ success: false, error: 'Failed to create order' });
@@ -829,12 +930,11 @@ app.post('/api/quality-check', async (req, res) => {
     const { crop, image, mimeType } = req.body;
 
     // 1. Validation of crop parameter
-    const cropLower = (crop || '').toLowerCase().trim();
-    const isSupportedCrop = cropLower && (SUPPORTED_CROPS.includes(cropLower) || SUPPORTED_FRUITS.includes(cropLower));
-    if (!isSupportedCrop) {
+    const normalizedCrop = normalizeCropKey(crop);
+    if (!normalizedCrop) {
       return res.status(400).json({
         success: false,
-        error: `Invalid or unsupported crop. Must be one of: ${SUPPORTED_CROPS.join(', ')} (or specific fruits like ${SUPPORTED_FRUITS.join(', ')})`,
+        error: `Invalid or unsupported crop. Must be one of: ${SUPPORTED_CROPS.join(', ')}`,
         code: 'UNSUPPORTED_CROP',
       });
     }

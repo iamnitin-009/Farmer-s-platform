@@ -1,7 +1,14 @@
 // src/utils/buyerMatching.js
-// Deterministic Buyer Matching & Ranking Engine for SIH 2026
+// BFM-001: Buyer–Farmer Matching & Multi-Farmer Order Allocation Engine
+// Deterministic 3-stage pipeline: Hard Eligibility Filters -> Scoring & Ranking -> Greedy Allocation
 
 import { getAllOrders } from './auth.js'
+import {
+  CROP_BASE_PRICES,
+  normalizeCropKey,
+  normalizeVariety,
+  getCropVarieties,
+} from './cropConstants.js'
 
 /**
  * Normalizes a location string into searchable tokens (city, district, state).
@@ -18,12 +25,10 @@ export function normalizeLocationTokens(loc) {
 }
 
 /**
- * Deterministic MVP Location Proximity Scorer.
- * Evaluates proximity based on matching city/district or state tokens.
- *
+ * Deterministic Location Proximity & Estimated Distance Calculator.
  * @param {string} farmerLoc
  * @param {string} buyerLoc
- * @returns {{ score: number, labelEn: string, labelHi: string, tier: 'local'|'regional'|'interstate'|'unknown' }}
+ * @returns {{ score: number, distanceKm: number, labelEn: string, labelHi: string, tier: 'local'|'regional'|'interstate'|'unknown' }}
  */
 export function calculateLocationProximity(farmerLoc, buyerLoc) {
   const fTokens = normalizeLocationTokens(farmerLoc)
@@ -31,17 +36,16 @@ export function calculateLocationProximity(farmerLoc, buyerLoc) {
 
   if (fTokens.length === 0 || bTokens.length === 0) {
     return {
-      score: 8,
-      labelEn: 'Location estimate pending',
-      labelHi: 'स्थान अनुमान प्रतीक्षित',
+      score: 12,
+      distanceKm: 150,
+      labelEn: 'Location estimate pending (~150 km)',
+      labelHi: 'स्थान अनुमान प्रतीक्षित (~150 किमी)',
       tier: 'unknown',
     }
   }
 
-  // Check exact token overlap (e.g. "nashik", "delhi", "karnal")
   const commonTokens = fTokens.filter((t) => bTokens.includes(t))
 
-  // State-level common tokens in India
   const stateKeywords = [
     'maharashtra', 'haryana', 'punjab', 'rajasthan', 'gujarat',
     'karnataka', 'tamil', 'nadu', 'kerala', 'uttar', 'pradesh',
@@ -53,7 +57,8 @@ export function calculateLocationProximity(farmerLoc, buyerLoc) {
 
   if (isCityMatch) {
     return {
-      score: 15,
+      score: 25,
+      distanceKm: 25,
       labelEn: 'Local (~15–30 km)',
       labelHi: 'स्थानीय (~15–30 किमी)',
       tier: 'local',
@@ -62,16 +67,17 @@ export function calculateLocationProximity(farmerLoc, buyerLoc) {
 
   if (isStateMatch || commonTokens.length > 0) {
     return {
-      score: 11,
+      score: 18,
+      distanceKm: 100,
       labelEn: 'Regional (~80–150 km)',
       labelHi: 'क्षेत्रीय (~80–150 किमी)',
       tier: 'regional',
     }
   }
 
-  // Inter-state transport
   return {
-    score: 6,
+    score: 10,
+    distanceKm: 450,
     labelEn: 'Inter-state transport (~300–600 km)',
     labelHi: 'अंतर-राज्य परिवहन (~300–600 किमी)',
     tier: 'interstate',
@@ -79,338 +85,511 @@ export function calculateLocationProximity(farmerLoc, buyerLoc) {
 }
 
 /**
- * Calculates deterministic Quality Compatibility (5 pts).
- *
- * @param {string|null} farmerGrade - 'A' | 'B' | 'C' | null
- * @param {string|null} buyerGrade - 'A' | 'B' | 'C' | null
- * @returns {{ score: number, reasonEn: string, reasonHi: string }}
+ * Grade numeric rank for deterministic comparisons (A=3, B=2, C=1, unassessed=2 default).
  */
-export function calculateQualityScore(farmerGrade, buyerGrade) {
-  const fGrade = farmerGrade ? String(farmerGrade).toUpperCase().trim() : null
-  const bGrade = buyerGrade ? String(buyerGrade).toUpperCase().trim() : null
-
-  // If buyer didn't specify a strict grade, standard harvest accepted
-  if (!bGrade) {
-    if (fGrade === 'A') {
-      return { score: 5, reasonEn: 'Grade A premium quality offered', reasonHi: 'ग्रेड A प्रीमियम गुणवत्ता उपलब्ध' }
-    }
-    if (fGrade === 'B') {
-      return { score: 5, reasonEn: 'Grade B commercial quality offered', reasonHi: 'ग्रेड B व्यावसायिक गुणवत्ता उपलब्ध' }
-    }
-    return { score: 4, reasonEn: 'Standard quality harvest', reasonHi: 'मानक गुणवत्ता उपज' }
-  }
-
-  if (fGrade === bGrade) {
-    return { score: 5, reasonEn: `Exact Grade ${fGrade} match`, reasonHi: `सटीक ग्रेड ${fGrade} मिलान` }
-  }
-
-  // Farmer grade exceeds buyer requirement
-  if (fGrade === 'A' && (bGrade === 'B' || bGrade === 'C')) {
-    return { score: 5, reasonEn: 'Grade A exceeds buyer requirement', reasonHi: 'ग्रेड A खरीदार की मांग से बेहतर' }
-  }
-  if (fGrade === 'B' && bGrade === 'C') {
-    return { score: 5, reasonEn: 'Grade B exceeds buyer requirement', reasonHi: 'ग्रेड B खरीदार की मांग से बेहतर' }
-  }
-
-  // Farmer grade is lower than requested
-  if (fGrade === 'B' && bGrade === 'A') {
-    return { score: 3, reasonEn: 'Grade B acceptable alternative for Grade A', reasonHi: 'ग्रेड A के लिए ग्रेड B स्वीकार्य विकल्प' }
-  }
-  if (fGrade === 'C' && bGrade === 'A') {
-    return { score: 1, reasonEn: 'Grade C below requested Grade A', reasonHi: 'ग्रेड C मांगी गई ग्रेड A से कम' }
-  }
-
-  return { score: 3, reasonEn: 'General harvest quality', reasonHi: 'सामान्य उपज गुणवत्ता' }
+export function getGradeRank(grade) {
+  if (!grade) return 2 // Commercial default
+  const g = String(grade).toUpperCase().trim()
+  if (g === 'A') return 3
+  if (g === 'B') return 2
+  if (g === 'C') return 1
+  return 2
 }
 
 /**
- * Calculates Quantity Compatibility Score (25 pts).
- *
- * @param {number} farmerQty - Available lot quantity in kg
- * @param {number} buyerQty - Desired buyer quantity in kg
- * @returns {{ score: number, reasonEn: string, reasonHi: string }}
+ * Normalizes buyer requirement criteria.
  */
-export function calculateQuantityScore(farmerQty, buyerQty) {
-  const fQ = Number(farmerQty) || 0
-  const bQ = Number(buyerQty) || 0
+export function normalizeBuyerRequirement(req = {}) {
+  const crop = normalizeCropKey(req.crop || req.product)
+  const quantity = Math.max(0, parseFloat(req.quantity) || 0)
+  const rawVariety = req.variety ? String(req.variety).trim() : null
+  const variety = (!rawVariety || rawVariety.toLowerCase() === 'any' || rawVariety.toLowerCase() === 'all')
+    ? null
+    : normalizeVariety(crop, rawVariety)
 
-  if (fQ <= 0 || bQ <= 0) {
-    return { score: 10, reasonEn: 'Quantity compatibility pending', reasonHi: 'मात्रा अनुकूलता प्रतीक्षित' }
+  const minGrade = req.minGrade && ['A', 'B', 'C'].includes(String(req.minGrade).toUpperCase())
+    ? String(req.minGrade).toUpperCase()
+    : null
+
+  const maxPrice = req.maxPrice ? parseFloat(req.maxPrice) : null
+  const maxDistance = req.maxDistance ? parseFloat(req.maxDistance) : null
+  const buyerLocation = (req.buyerLocation || req.location || '').trim()
+
+  return {
+    crop,
+    quantity,
+    variety,
+    isAnyVariety: !variety,
+    minGrade,
+    maxPrice: maxPrice && maxPrice > 0 ? maxPrice : null,
+    maxDistance: maxDistance && maxDistance > 0 ? maxDistance : null,
+    buyerLocation,
+    pickupConstraint: req.pickupConstraint || null,
+  }
+}
+
+/**
+ * Stage 1: Hard Eligibility Filters.
+ * Evaluates whether a farmer listing is strictly eligible for a buyer requirement.
+ * Crop is an eligibility gate, NOT a score contributor.
+ *
+ * @param {Object} listing - Farmer listing
+ * @param {Object} requirement - Normalized buyer requirement
+ * @returns {{ eligible: boolean, reason?: string }}
+ */
+export function checkListingEligibility(listing, requirement) {
+  if (!listing || !requirement) {
+    return { eligible: false, reason: 'Invalid listing or requirement payload' }
   }
 
-  // Case 1: Buyer wants less than or equal to farmer's lot (full fulfillment)
-  if (bQ <= fQ) {
-    const ratio = bQ / fQ
-    if (ratio >= 0.5) {
+  // Active status check
+  if (listing.status === 'Sold Out' || listing.status === 'Sold' || listing.moderationStatus === 'rejected') {
+    return { eligible: false, reason: 'Listing is sold out or inactive' }
+  }
+
+  // Available quantity check
+  const availableQty = Math.max(0, (listing.quantity || 0) - (listing.reservedQuantity || 0))
+  if (availableQty <= 0) {
+    return { eligible: false, reason: 'No available unreserved inventory' }
+  }
+
+  // 1. Mandatory Crop Match Gate
+  const listingCrop = normalizeCropKey(listing.crop)
+  if (!listingCrop || listingCrop !== requirement.crop) {
+    return { eligible: false, reason: `Crop mismatch: requires ${requirement.crop}, listing is ${listing.crop}` }
+  }
+
+  // 2. Variety Safety Gate
+  if (!requirement.isAnyVariety && requirement.variety) {
+    const reqVarNorm = normalizeVariety(requirement.crop, requirement.variety)
+    const listVarNorm = normalizeVariety(listing.crop, listing.variety)
+    if (!listVarNorm || listVarNorm.toLowerCase() !== reqVarNorm.toLowerCase()) {
       return {
-        score: 25,
-        reasonEn: `Fulfills buyer lot (${bQ} kg from ${fQ} kg)`,
-        reasonHi: `खरीदार की मांग पूर्ण (${fQ} किग्रा में से ${bQ} किग्रा)`,
+        eligible: false,
+        reason: `Variety mismatch: requires ${requirement.variety}, listing is ${listing.variety || 'Unknown'}`,
       }
     }
-    // Partial lot (less than 50% of farmer's batch)
-    const partialScore = Math.round(15 + 10 * (ratio / 0.5))
-    return {
-      score: partialScore,
-      reasonEn: `Partial batch purchase (${bQ} kg of ${fQ} kg lot)`,
-      reasonHi: `आंशिक लॉट खरीद (${fQ} किग्रा में से ${bQ} किग्रा)`,
+  }
+
+  // 3. Minimum Grade Gate
+  if (requirement.minGrade) {
+    const listGrade = listing.quality?.grade || listing.grade || null
+    const listRank = getGradeRank(listGrade)
+    const reqRank = getGradeRank(requirement.minGrade)
+    if (listRank < reqRank) {
+      return {
+        eligible: false,
+        reason: `Grade below requirement: requires Grade ${requirement.minGrade}, listing is Grade ${listGrade || 'C'}`,
+      }
     }
   }
 
-  // Case 2: Buyer wants more than farmer currently has (farmer covers a major share)
-  const coverageRatio = fQ / bQ
-  if (coverageRatio >= 0.7) {
-    return {
-      score: 20,
-      reasonEn: `Supplies ${Math.round(coverageRatio * 100)}% of buyer demand (${fQ} / ${bQ} kg)`,
-      reasonHi: `खरीदार की ${Math.round(coverageRatio * 100)}% मांग की पूर्ति (${fQ} / ${bQ} किग्रा)`,
+  // 4. Maximum Price Gate
+  if (requirement.maxPrice !== null) {
+    const askingPrice = parseFloat(listing.price ?? listing.expectedPrice ?? 0)
+    if (askingPrice > requirement.maxPrice) {
+      return {
+        eligible: false,
+        reason: `Price exceeds ceiling: asking ₹${askingPrice}/kg, max offered ₹${requirement.maxPrice}/kg`,
+      }
     }
   }
-  if (coverageRatio >= 0.3) {
-    return {
-      score: 15,
-      reasonEn: `Supplies ${Math.round(coverageRatio * 100)}% of buyer demand (${fQ} / ${bQ} kg)`,
-      reasonHi: `खरीदार की ${Math.round(coverageRatio * 100)}% मांग की पूर्ति (${fQ} / ${bQ} किग्रा)`,
+
+  // 5. Maximum Distance Gate
+  if (requirement.maxDistance !== null) {
+    const prox = calculateLocationProximity(listing.location, requirement.buyerLocation)
+    if (prox.distanceKm > requirement.maxDistance) {
+      return {
+        eligible: false,
+        reason: `Distance exceeds radius: ~${prox.distanceKm} km vs max ${requirement.maxDistance} km`,
+      }
     }
   }
-  return {
-    score: 10,
-    reasonEn: `Supplies small share (${fQ} kg towards ${bQ} kg requirement)`,
-    reasonHi: `छोटी आपूर्ति (${bQ} किग्रा की मांग के लिए ${fQ} किग्रा)`,
-  }
+
+  return { eligible: true }
 }
 
 /**
- * Calculates Price Compatibility Score (20 pts).
- *
- * @param {number} farmerPrice - Farmer's asking price in ₹/kg
- * @param {number} buyerPrice - Buyer's offered / historical price in ₹/kg
- * @returns {{ score: number, reasonEn: string, reasonHi: string }}
+ * Filters all listings against a requirement using Stage 1 Hard Filters.
  */
-export function calculatePriceScore(farmerPrice, buyerPrice) {
-  const fP = Number(farmerPrice) || 0
-  const bP = Number(buyerPrice) || 0
-
-  if (fP <= 0 || bP <= 0) {
-    return { score: 10, reasonEn: 'Market rate subject to negotiation', reasonHi: 'दर पर बातचीत संभव' }
-  }
-
-  if (bP >= fP) {
-    return {
-      score: 20,
-      reasonEn: `Offered rate (₹${bP}/kg) meets or exceeds asking (₹${fP}/kg)`,
-      reasonHi: `प्रस्तावित दर (₹${bP}/किग्रा) किसान दर (₹${fP}/किग्रा) के बराबर या अधिक`,
-    }
-  }
-
-  const ratio = bP / fP
-  if (ratio >= 0.95) {
-    return {
-      score: 18,
-      reasonEn: `Offered rate (₹${bP}/kg) is within 5% of asking (₹${fP}/kg)`,
-      reasonHi: `प्रस्तावित दर (₹${bP}/किग्रा) किसान दर के अत्यंत निकट (5% के भीतर)`,
-    }
-  }
-  if (ratio >= 0.90) {
-    return {
-      score: 15,
-      reasonEn: `Offered rate (₹${bP}/kg) is within 10% of asking (₹${fP}/kg)`,
-      reasonHi: `प्रस्तावित दर (₹${bP}/किग्रा) किसान दर के 10% के भीतर`,
-    }
-  }
-  if (ratio >= 0.80) {
-    return {
-      score: 11,
-      reasonEn: `Offered rate (₹${bP}/kg) is within 20% of asking (₹${fP}/kg)`,
-      reasonHi: `प्रस्तावित दर (₹${bP}/किग्रा) किसान दर के 20% के भीतर`,
-    }
-  }
-  if (ratio >= 0.70) {
-    return {
-      score: 7,
-      reasonEn: `Offered rate (₹${bP}/kg) is lower than asking (₹${fP}/kg)`,
-      reasonHi: `प्रस्तावित दर (₹${bP}/किग्रा) किसान दर से कम`,
-    }
-  }
-  return {
-    score: 3,
-    reasonEn: `Significant price gap: ₹${bP}/kg offered vs ₹${fP}/kg asking`,
-    reasonHi: `दर में बड़ा अंतर: ₹${bP} प्रस्तावित बनाम ₹${fP} मांग`,
-  }
+export function filterEligibleListings(listings, requirement) {
+  if (!Array.isArray(listings)) return []
+  const normReq = normalizeBuyerRequirement(requirement)
+  return listings.filter((l) => checkListingEligibility(l, normReq).eligible)
 }
 
 /**
- * Computes deterministic match score (0-100) between a farmer listing and a buyer demand order.
- *
- * @param {Object} listing - Farmer produce listing
- * @param {Object} demand - Buyer order / demand record
- * @returns {{
- *   matchScore: number,
- *   eligible: boolean,
- *   breakdown: { crop: number, quantity: number, price: number, location: number, quality: number },
- *   reasonsEn: string[],
- *   reasonsHi: string[],
- *   distanceEstimateEn: string,
- *   distanceEstimateHi: string,
- * }}
+ * Stage 2: Match Scoring (0-100 deterministic, explainable).
+ * Factors: Price competitiveness (30), Distance (25), Quantity Fit (25), Quality (12), Logistics (8).
+ * Quantity scoring explicitly favors allocations that reduce the number of farmers needed.
  */
-export function calculateBuyerMatchScore(listing, demand) {
-  if (!listing || !demand) {
-    return { matchScore: 0, eligible: false, breakdown: {}, reasonsEn: [], reasonsHi: [] }
-  }
-
-  const listingCrop = (listing.crop || '').toLowerCase().trim()
-  const demandCrop = (demand.crop || '').toLowerCase().trim()
-
-  // 1. Mandatory Crop Match (35 pts)
-  if (!listingCrop || !demandCrop || listingCrop !== demandCrop) {
+export function scoreListingMatch(listing, requirement) {
+  const normReq = normalizeBuyerRequirement(requirement)
+  const eligCheck = checkListingEligibility(listing, normReq)
+  if (!eligCheck.eligible) {
     return {
       matchScore: 0,
       eligible: false,
-      breakdown: { crop: 0, quantity: 0, price: 0, location: 0, quality: 0 },
-      reasonsEn: ['Crop does not match'],
-      reasonsHi: ['फसल मेल नहीं खाती'],
-      distanceEstimateEn: '',
-      distanceEstimateHi: '',
+      reasonsEn: [eligCheck.reason || 'Not eligible'],
+      reasonsHi: ['अपात्र सूची'],
+      breakdown: { price: 0, distance: 0, quantityFit: 0, quality: 0, logistics: 0 },
     }
   }
-  const cropScore = 35
 
-  // 2. Quantity Compatibility (25 pts)
-  const qtyResult = calculateQuantityScore(listing.quantity, demand.quantity)
+  const crop = normReq.crop
+  const basePrice = CROP_BASE_PRICES[crop] || 35
+  const askingPrice = parseFloat(listing.price ?? listing.expectedPrice ?? basePrice)
+  const targetPrice = normReq.maxPrice || basePrice
 
-  // 3. Price Compatibility (20 pts)
-  const farmerPrice = listing.price ?? listing.expectedPrice ?? listing.fairPrice?.suggestedPrice ?? 0
-  const buyerPrice = demand.pricePerKg ?? demand.offeredPrice ?? demand.price ?? 0
-  const priceResult = calculatePriceScore(farmerPrice, buyerPrice)
+  // 1. Price Competitiveness (up to 30 pts)
+  let priceScore = 20
+  if (askingPrice <= targetPrice * 0.9) {
+    priceScore = 30
+  } else if (askingPrice <= targetPrice) {
+    priceScore = 25
+  } else {
+    const ratio = targetPrice / askingPrice
+    priceScore = Math.max(5, Math.round(25 * ratio))
+  }
 
-  // 4. Location Proximity (15 pts)
-  const farmerLoc = listing.location || ''
-  const buyerLoc = demand.buyerLocation || demand.location || ''
-  const locResult = calculateLocationProximity(farmerLoc, buyerLoc)
+  // 2. Distance / Proximity (up to 25 pts)
+  const locResult = calculateLocationProximity(listing.location, normReq.buyerLocation)
+  const distanceScore = locResult.score // 25 for local, 18 for regional, 10 for interstate
 
-  // 5. Quality Compatibility (5 pts)
-  const farmerGrade = listing.quality?.grade ?? listing.grade ?? null
-  const buyerGrade = demand.preferredGrade ?? demand.grade ?? null
-  const qualityResult = calculateQualityScore(farmerGrade, buyerGrade)
+  // 3. Quantity Fit / Reducing Farmer Count (up to 25 pts)
+  const availableQty = Math.max(0, (listing.quantity || 0) - (listing.reservedQuantity || 0))
+  const neededQty = normReq.quantity || 1
+  let quantityFitScore = 10
+  if (availableQty >= neededQty) {
+    // Single farmer can fulfill 100% of the order alone!
+    quantityFitScore = 25
+  } else {
+    const coverageRatio = availableQty / neededQty
+    if (coverageRatio >= 0.7) {
+      quantityFitScore = 22
+    } else if (coverageRatio >= 0.4) {
+      quantityFitScore = 18
+    } else if (coverageRatio >= 0.2) {
+      quantityFitScore = 14
+    } else {
+      quantityFitScore = 10
+    }
+  }
 
-  const totalScore = Math.min(100, Math.round(
-    cropScore + qtyResult.score + priceResult.score + locResult.score + qualityResult.score
-  ))
+  // 4. Quality Grade (up to 12 pts)
+  const grade = listing.quality?.grade || listing.grade || 'B'
+  let qualityScore = 9
+  if (grade === 'A') qualityScore = 12
+  else if (grade === 'B') qualityScore = 9
+  else if (grade === 'C') qualityScore = 5
+
+  // 5. Logistics Compatibility (up to 8 pts)
+  let logisticsScore = 6
+  if (listing.pickupDecision?.method === 'HOME' && availableQty >= 100) {
+    logisticsScore = 8 // Direct bulk farmgate pickup
+  } else if (listing.pickupDecision?.method === 'HUB') {
+    logisticsScore = 7
+  }
+
+  const totalScore = Math.min(100, priceScore + distanceScore + quantityFitScore + qualityScore + logisticsScore)
 
   const reasonsEn = [
-    `Crop matched: ${listingCrop.charAt(0).toUpperCase() + listingCrop.slice(1)}`,
-    qtyResult.reasonEn,
-    priceResult.reasonEn,
-    `Location: ${buyerLoc || 'Region'} (${locResult.labelEn})`,
-    qualityResult.reasonEn,
+    `Price ₹${askingPrice}/kg (${priceScore}/30 pts)`,
+    `${locResult.labelEn} (${distanceScore}/25 pts)`,
+    `Supplies ${Math.min(availableQty, neededQty)} kg towards demand (${quantityFitScore}/25 pts)`,
+    `Quality Grade ${grade} (${qualityScore}/12 pts)`,
+    `Pickup: ${listing.pickupDecision?.method || 'Standard'} (${logisticsScore}/8 pts)`,
   ]
 
   const reasonsHi = [
-    `फसल सुसंगत: ${listingCrop}`,
-    qtyResult.reasonHi,
-    priceResult.reasonHi,
-    `स्थान: ${buyerLoc || 'क्षेत्र'} (${locResult.labelHi})`,
-    qualityResult.reasonHi,
+    `मूल्य ₹${askingPrice}/किग्रा (${priceScore}/30 अंक)`,
+    `${locResult.labelHi} (${distanceScore}/25 अंक)`,
+    `मांग के लिए ${Math.min(availableQty, neededQty)} किग्रा आपूर्ति (${quantityFitScore}/25 अंक)`,
+    `गुणवत्ता ग्रेड ${grade} (${qualityScore}/12 अंक)`,
+    `पिकअप: ${listing.pickupDecision?.method || 'मानक'} (${logisticsScore}/8 अंक)`,
   ]
 
   return {
     matchScore: totalScore,
     eligible: true,
     breakdown: {
-      crop: cropScore,
-      quantity: qtyResult.score,
-      price: priceResult.score,
-      location: locResult.score,
-      quality: qualityResult.score,
+      price: priceScore,
+      distance: distanceScore,
+      quantityFit: quantityFitScore,
+      quality: qualityScore,
+      logistics: logisticsScore,
     },
     reasonsEn,
     reasonsHi,
+    distanceKm: locResult.distanceKm,
     distanceEstimateEn: locResult.labelEn,
     distanceEstimateHi: locResult.labelHi,
   }
 }
 
 /**
- * Finds and ranks buyer demand matches for a given farmer listing.
- * Sourced from verified marketplace orders.
+ * Stage 3: Greedy Multi-Farmer Allocation Engine.
+ * Strategy: SCORE -> SORT -> GREEDY FILL
  *
- * @param {Object} params
- * @param {Object} params.listing - Farmer listing
- * @param {Array} [params.orders] - Optional orders array (defaults to getAllOrders())
- * @param {string} [params.currentUserId] - Optional farmer ID to filter out self-orders
- * @param {string} [params.lang='en'] - Output language
- * @returns {Array<{
- *   id: string,
- *   buyerId: string,
- *   buyerName: string,
- *   buyerMobile: string,
- *   buyerLocation: string,
- *   quantity: number,
- *   offeredPrice: number,
- *   matchScore: number,
- *   distanceEstimate: string,
- *   reasons: string[],
- *   date: string,
- * }>} Ranked array of buyer matches, sorted descending by matchScore
+ * @param {Object} requirement - Buyer order requirement
+ * @param {Array<Object>} listings - Available listings
+ * @returns {{
+ *   requirement: Object,
+ *   requestedQuantity: number,
+ *   fulfilledQuantity: number,
+ *   remainingQuantity: number,
+ *   fulfillmentStatus: 'FULFILLED' | 'PARTIAL' | 'UNFULFILLED',
+ *   totalAmount: number,
+ *   weightedAveragePrice: number,
+ *   allocations: Array<Object>,
+ *   candidateCount: number,
+ *   eligibleCount: number,
+ * }}
  */
-export function findBuyerMatches({
-  listing,
-  orders = null,
-  currentUserId = null,
-  lang = 'en',
-} = {}) {
-  if (!listing || !listing.crop) return []
+function allocateSingleVarietyPlan(normReq, candidates = [], totalCandidateCount = candidates.length) {
+  if (candidates.length === 0 || normReq.quantity <= 0) {
+    return {
+      requirement: normReq,
+      requestedQuantity: normReq.quantity,
+      fulfilledQuantity: 0,
+      remainingQuantity: normReq.quantity,
+      fulfillmentStatus: 'UNFULFILLED',
+      totalAmount: 0,
+      weightedAveragePrice: 0,
+      allocations: [],
+      candidateCount: totalCandidateCount,
+      eligibleCount: 0,
+    }
+  }
 
+  // Score each eligible candidate
+  const scored = candidates.map((item) => {
+    const analysis = scoreListingMatch(item, normReq)
+    const availableQty = Math.max(0, (item.quantity || 0) - (item.reservedQuantity || 0))
+    return {
+      listing: item,
+      availableQuantity: availableQty,
+      score: analysis.matchScore,
+      breakdown: analysis.breakdown,
+      reasonsEn: analysis.reasonsEn,
+      reasonsHi: analysis.reasonsHi,
+      distanceKm: analysis.distanceKm,
+    }
+  })
+
+  // Sort descending by score, then largest available lot to minimize farmer count
+  scored.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score
+    return b.availableQuantity - a.availableQuantity
+  })
+
+  let remainingDemand = normReq.quantity
+  const allocations = []
+  let totalAmount = 0
+
+  for (const candidate of scored) {
+    if (remainingDemand <= 0) break
+    const { listing, availableQuantity, score, breakdown, reasonsEn, reasonsHi } = candidate
+    if (availableQuantity <= 0) continue
+
+    const allocatedQty = Math.min(availableQuantity, remainingDemand)
+    const unitPrice = parseFloat(listing.price ?? listing.expectedPrice ?? 0)
+    const itemTotal = Math.round(allocatedQty * unitPrice * 100) / 100
+
+    allocations.push({
+      allocationId: 'ALC_' + Date.now().toString().slice(-6) + '_' + Math.random().toString(36).substring(2, 6),
+      listingId: listing.id,
+      farmerId: listing.farmerId || 'farmer_anon',
+      farmerName: listing.farmerName || 'Verified Farmer',
+      farmerMobile: listing.farmerMobile || '',
+      farmerLocation: listing.location || '',
+      crop: listing.crop,
+      variety: listing.variety || 'Regular',
+      grade: listing.quality?.grade || listing.grade || 'B',
+      allocatedQuantity: allocatedQty,
+      unitPrice,
+      agreedPrice: unitPrice,
+      totalAmount: itemTotal,
+      status: 'PENDING',
+      score,
+      scoreBreakdown: breakdown,
+      reasons: reasonsEn,
+      reasonsHi,
+      createdAt: new Date().toISOString(),
+    })
+
+    totalAmount += itemTotal
+    remainingDemand -= allocatedQty
+  }
+
+  const fulfilledQuantity = Math.round((normReq.quantity - remainingDemand) * 100) / 100
+  const remainingQuantity = Math.max(0, Math.round(remainingDemand * 100) / 100)
+  const fulfillmentStatus = remainingQuantity === 0 ? 'FULFILLED' : (fulfilledQuantity > 0 ? 'PARTIAL' : 'UNFULFILLED')
+  const weightedAveragePrice = fulfilledQuantity > 0 ? Math.round((totalAmount / fulfilledQuantity) * 100) / 100 : 0
+
+  return {
+    requirement: normReq,
+    requestedQuantity: normReq.quantity,
+    fulfilledQuantity,
+    remainingQuantity,
+    fulfillmentStatus,
+    totalAmount: Math.round(totalAmount * 100) / 100,
+    weightedAveragePrice,
+    allocations,
+    candidateCount: totalCandidateCount,
+    eligibleCount: candidates.length,
+  }
+}
+
+export function allocateMultiFarmerOrder(requirement, listings = []) {
+  const normReq = normalizeBuyerRequirement(requirement)
+  const eligible = filterEligibleListings(listings, normReq)
+
+  if (eligible.length === 0 || normReq.quantity <= 0) {
+    return {
+      requirement: normReq,
+      requestedQuantity: normReq.quantity,
+      fulfilledQuantity: 0,
+      remainingQuantity: normReq.quantity,
+      fulfillmentStatus: 'UNFULFILLED',
+      totalAmount: 0,
+      weightedAveragePrice: 0,
+      allocations: [],
+      candidateCount: listings.length,
+      eligibleCount: 0,
+    }
+  }
+
+  // When variety is unspecified, evaluate homogeneous variety groups so incompatible varieties are never mixed
+  if (normReq.isAnyVariety) {
+    const varietyGroups = groupListingsByVariety(normReq.crop, eligible)
+    const varietyKeys = Object.keys(varietyGroups).filter((v) => varietyGroups[v]?.length > 0)
+
+    if (varietyKeys.length > 1) {
+      const candidatePlans = varietyKeys.map((vKey) => {
+        const subReq = { ...normReq, variety: vKey, isAnyVariety: false }
+        const plan = allocateSingleVarietyPlan(subReq, varietyGroups[vKey], listings.length)
+        return { variety: vKey, plan }
+      })
+
+      const activePlans = candidatePlans.filter((cp) => cp.plan.fulfilledQuantity > 0)
+
+      if (activePlans.length > 0) {
+        activePlans.sort((a, b) => {
+          if (b.plan.fulfilledQuantity !== a.plan.fulfilledQuantity) {
+            return b.plan.fulfilledQuantity - a.plan.fulfilledQuantity
+          }
+          const scoreA = a.plan.allocations.reduce((acc, x) => acc + (x.score || 0), 0) / (a.plan.allocations.length || 1)
+          const scoreB = b.plan.allocations.reduce((acc, x) => acc + (x.score || 0), 0) / (b.plan.allocations.length || 1)
+          if (scoreB !== scoreA) {
+            return scoreB - scoreA
+          }
+          return a.plan.weightedAveragePrice - b.plan.weightedAveragePrice
+        })
+
+        const best = activePlans[0].plan
+        best.variety = activePlans[0].variety
+        best.varietyPlans = candidatePlans.reduce((acc, curr) => {
+          acc[curr.variety] = curr.plan
+          return acc
+        }, {})
+        best.eligibleCount = eligible.length
+        best.candidateCount = listings.length
+        return best
+      }
+    }
+  }
+
+  return allocateSingleVarietyPlan(normReq, eligible, listings.length)
+}
+
+/**
+ * Group listings by variety for safe presentation when buyer specifies 'Any' variety.
+ * Prevents blending incompatible varieties into one homogeneous allocation.
+ */
+export function groupListingsByVariety(cropOrListings, maybeListings = []) {
+  let crop = null
+  let listings = []
+  if (Array.isArray(cropOrListings)) {
+    listings = cropOrListings
+    crop = listings[0]?.crop || null
+  } else {
+    crop = cropOrListings
+    listings = maybeListings
+  }
+
+  const normCrop = normalizeCropKey(crop)
+  const validVarieties = normCrop ? getCropVarieties(normCrop) : []
+
+  const groups = {}
+  for (const v of validVarieties) {
+    groups[v] = []
+  }
+
+  for (const item of listings) {
+    const itemCrop = normalizeCropKey(item.crop) || normCrop
+    const rawV = item.variety || 'Regular'
+    const v = (itemCrop ? normalizeVariety(itemCrop, rawV) : null) || rawV
+    if (!groups[v]) groups[v] = []
+    groups[v].push(item)
+  }
+
+  return groups
+}
+
+/**
+ * Backward compatibility wrapper for Farmer Portal "Buyer Matches" tab.
+ * Evaluates verified marketplace orders for a farmer listing.
+ */
+export function findBuyerMatches({ listing, orders = null, currentUserId = null, lang = 'en' } = {}) {
+  if (!listing || !listing.crop) return []
   const allOrders = orders !== null ? orders : getAllOrders()
   if (!Array.isArray(allOrders) || allOrders.length === 0) return []
 
-  // Clean buyer demand records
   const matches = []
-
   for (const order of allOrders) {
-    // Exclude farmer's own buy orders to ensure genuine independent demand
     if (currentUserId && (order.buyerId === currentUserId || order.buyerMobile === listing.farmerMobile)) {
       continue
     }
 
-    const matchAnalysis = calculateBuyerMatchScore(listing, order)
-    if (!matchAnalysis.eligible || matchAnalysis.matchScore <= 0) {
-      continue
+    const req = {
+      crop: order.crop,
+      quantity: order.quantity || order.quantityKg || 0,
+      variety: order.variety || null,
+      minGrade: order.preferredGrade || order.minGrade || null,
+      maxPrice: order.pricePerKg || order.offeredPrice || null,
+      buyerLocation: order.buyerLocation || order.location || '',
     }
+
+    const normReq = normalizeBuyerRequirement(req)
+    const elig = checkListingEligibility(listing, normReq)
+    if (!elig.eligible) continue
+
+    const scoreData = scoreListingMatch(listing, normReq)
+    if (scoreData.matchScore <= 0) continue
 
     matches.push({
       id: order.id || 'demand_' + Math.random().toString(36).substring(2, 8),
       buyerId: order.buyerId || 'buyer_anon',
       buyerName: order.buyerName || 'Verified Buyer',
       buyerMobile: order.buyerMobile ? maskMobile(order.buyerMobile) : '+91 ••••• •••••',
-      rawMobile: order.buyerMobile || '',
       buyerLocation: order.buyerLocation || order.location || 'Local Market',
       crop: order.crop,
+      variety: order.variety || null,
       quantity: order.quantity || 0,
       offeredPrice: order.pricePerKg ?? order.offeredPrice ?? 0,
-      matchScore: matchAnalysis.matchScore,
-      distanceEstimate: lang === 'hi' ? matchAnalysis.distanceEstimateHi : matchAnalysis.distanceEstimateEn,
-      reasons: lang === 'hi' ? matchAnalysis.reasonsHi : matchAnalysis.reasonsEn,
-      breakdown: matchAnalysis.breakdown,
+      matchScore: scoreData.matchScore,
+      distanceEstimate: lang === 'hi' ? scoreData.distanceEstimateHi : scoreData.distanceEstimateEn,
+      reasons: lang === 'hi' ? scoreData.reasonsHi : scoreData.reasonsEn,
+      breakdown: scoreData.breakdown,
       date: order.createdAt || new Date().toISOString(),
     })
   }
 
-  // Sort descending by matchScore, then by newest date
-  matches.sort((a, b) => {
-    if (b.matchScore !== a.matchScore) {
-      return b.matchScore - a.matchScore
-    }
-    return new Date(b.date).getTime() - new Date(a.date).getTime()
-  })
-
+  matches.sort((a, b) => b.matchScore - a.matchScore)
   return matches
 }
 
-/**
- * Mask mobile for privacy in presentation (e.g. 9876543210 -> +91 98****3210).
- */
 function maskMobile(mobile) {
   if (!mobile || typeof mobile !== 'string') return '+91 ••••• •••••'
   const cleaned = mobile.trim()

@@ -7,16 +7,7 @@ import {
 import { getGradeBadgeStyle } from '../utils/quality.js'
 import { IconPin, IconBasket } from '../components/Icons.jsx'
 
-const CROP_KEYS = ['tomato', 'wheat', 'rice', 'potato', 'onion', 'fruits']
-
-const CROP_ICONS = {
-  tomato: '🍅',
-  wheat: '🌾',
-  rice: '🍚',
-  potato: '🥔',
-  onion: '🧅',
-  fruits: '🍎',
-}
+import { CROP_KEYS, CROP_ICONS } from '../utils/cropConstants.js'
 
 export default function HubAggregationPage({ _session, onNavigate }) {
   const { t } = useLanguage()
