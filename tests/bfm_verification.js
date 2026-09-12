@@ -1,8 +1,10 @@
 // tests/bfm_verification.js
 import assert from 'assert';
 import { allocateMultiFarmerOrder, groupListingsByVariety, scoreListingMatch } from '../server/matchingEngine.js';
-import { CROP_KEYS, CROP_VARIETIES } from '../server/cropConstants.js';
+import { CROP_KEYS, CROP_VARIETIES, getCropVarieties, normalizeVariety } from '../server/cropConstants.js';
 import { listingStore } from '../server/listingStore.js';
+import { calculateFairPrice as serverCalculateFairPrice } from '../server/fairPrice.js';
+import { calculateFairPrice as clientCalculateFairPrice } from '../src/utils/fairPrice.js';
 
 async function runTests() {
   console.log('====================================================');
@@ -34,6 +36,14 @@ async function runTests() {
       console.error(err);
       failed++;
     }
+  }
+
+  await listingStore.init();
+  if (Array.isArray(listingStore.inMemoryListings)) {
+    listingStore.inMemoryListings = listingStore.inMemoryListings.filter(
+      (l) => !l.id.startsWith('test_') && !l.id.startsWith('list_fair_price_test_')
+    );
+    listingStore.saveLocalStore();
   }
 
   // 1. CROP-001 Scope Check
@@ -220,62 +230,64 @@ async function runTests() {
     const listBasmatiId = 'test_d_basmati_' + Date.now();
     const listSonaId = 'test_d_sona_' + Date.now();
 
-    await listingStore.createListing({
-      id: listBasmatiId,
-      farmerId: 'farmer_d1',
-      farmerName: 'Farmer D1',
-      crop: 'rice',
-      variety: 'Basmati',
-      quantity: 300,
-      reservedQuantity: 0,
-      price: 60,
-      location: 'Delhi',
-      quality: { grade: 'A', score: 90 },
-    });
-
-    await listingStore.createListing({
-      id: listSonaId,
-      farmerId: 'farmer_d2',
-      farmerName: 'Farmer D2',
-      crop: 'rice',
-      variety: 'Sona Masoori',
-      quantity: 400,
-      reservedQuantity: 0,
-      price: 40,
-      location: 'Delhi',
-      quality: { grade: 'A', score: 92 },
-    });
-
-    const storeOrderRes = await listingStore.createMultiFarmerOrder({
-      requirement: {
+    try {
+      await listingStore.createListing({
+        id: listBasmatiId,
+        farmerId: 'farmer_d1',
+        farmerName: 'Farmer D1',
         crop: 'rice',
-        variety: null, // Unspecified
-        quantity: 600,
-        buyerLocation: 'Delhi',
-      },
-      buyerSession: { id: 'buyer_d', name: 'Buyer D' },
-    });
+        variety: 'Basmati',
+        quantity: 300,
+        reservedQuantity: 0,
+        price: 60,
+        location: 'Delhi',
+        quality: { grade: 'A', score: 90 },
+      });
 
-    assert(storeOrderRes.success, 'Store allocation should succeed');
-    const parentOrder = storeOrderRes.order;
-    assert.strictEqual(parentOrder.crop, 'rice');
-    assert.strictEqual(parentOrder.variety, 'Sona Masoori');
-    assert.strictEqual(parentOrder.fulfilledQuantity, 400);
-    // Verify parent order allocations never mix different varieties
-    const orderVarieties = new Set(parentOrder.allocations.map((a) => a.variety));
-    assert.strictEqual(orderVarieties.size, 1, 'Parent order must contain exactly 1 variety');
-    assert(orderVarieties.has('Sona Masoori'));
-    assert(!orderVarieties.has('Basmati'), 'Basmati must not be blended into Sona Masoori order');
+      await listingStore.createListing({
+        id: listSonaId,
+        farmerId: 'farmer_d2',
+        farmerName: 'Farmer D2',
+        crop: 'rice',
+        variety: 'Sona Masoori',
+        quantity: 400,
+        reservedQuantity: 0,
+        price: 40,
+        location: 'Delhi',
+        quality: { grade: 'A', score: 92 },
+      });
 
-    // Verify inventory reservation in store: Sona Masoori reserved 400, Basmati remained untouched (0 reserved)
-    const sonaCheck = await listingStore.getListingById(listSonaId);
-    assert.strictEqual(sonaCheck.reservedQuantity, 400);
-    const basmatiCheck = await listingStore.getListingById(listBasmatiId);
-    assert.strictEqual(basmatiCheck.reservedQuantity, 0, 'Incompatible variety must not be reserved');
+      const storeOrderRes = await listingStore.createMultiFarmerOrder({
+        requirement: {
+          crop: 'rice',
+          variety: null, // Unspecified
+          quantity: 600,
+          buyerLocation: 'Delhi',
+        },
+        buyerSession: { id: 'buyer_d', name: 'Buyer D' },
+      });
 
-    // Clean up test listings
-    await listingStore.deleteListing(listBasmatiId);
-    await listingStore.deleteListing(listSonaId);
+      assert(storeOrderRes.success, 'Store allocation should succeed');
+      const parentOrder = storeOrderRes.order;
+      assert.strictEqual(parentOrder.crop, 'rice');
+      assert.strictEqual(parentOrder.variety, 'Sona Masoori');
+      assert.strictEqual(parentOrder.fulfilledQuantity, 400);
+      // Verify parent order allocations never mix different varieties
+      const orderVarieties = new Set(parentOrder.allocations.map((a) => a.variety));
+      assert.strictEqual(orderVarieties.size, 1, 'Parent order must contain exactly 1 variety');
+      assert(orderVarieties.has('Sona Masoori'));
+      assert(!orderVarieties.has('Basmati'), 'Basmati must not be blended into Sona Masoori order');
+
+      // Verify inventory reservation in store: Sona Masoori reserved 400, Basmati remained untouched (0 reserved)
+      const sonaCheck = await listingStore.getListingById(listSonaId);
+      assert.strictEqual(sonaCheck.reservedQuantity, 400);
+      const basmatiCheck = await listingStore.getListingById(listBasmatiId);
+      assert.strictEqual(basmatiCheck.reservedQuantity, 0, 'Incompatible variety must not be reserved');
+    } finally {
+      // Clean up test listings
+      await listingStore.deleteListing(listBasmatiId);
+      await listingStore.deleteListing(listSonaId);
+    }
   });
 
   // 6. Scenario E: Minimum Grade Filter
@@ -470,6 +482,153 @@ async function runTests() {
     // Clean up
     await listingStore.deleteListing(listA_id);
     await listingStore.deleteListing(listB_id);
+  });
+
+  // 10. Rice Variety Pricing Hierarchy
+  test('Pricing: Rice variety hierarchy (1121 Basmati > Basmati > Sona Masoori > PR-14 > Regular)', () => {
+    const p1121 = serverCalculateFairPrice({ crop: 'rice', variety: '1121 Basmati', quantity: 100 });
+    const pBasmati = serverCalculateFairPrice({ crop: 'rice', variety: 'Basmati', quantity: 100 });
+    const pSona = serverCalculateFairPrice({ crop: 'rice', variety: 'Sona Masoori', quantity: 100 });
+    const pPR14 = serverCalculateFairPrice({ crop: 'rice', variety: 'PR-14', quantity: 100 });
+    const pRegular = serverCalculateFairPrice({ crop: 'rice', variety: 'Regular', quantity: 100 });
+
+    assert(p1121.suggestedPrice > pBasmati.suggestedPrice, '1121 Basmati must be > Basmati');
+    assert(pBasmati.suggestedPrice > pSona.suggestedPrice, 'Basmati must be > Sona Masoori');
+    assert(pSona.suggestedPrice >= pPR14.suggestedPrice, 'Sona Masoori must be >= PR-14');
+    assert(pPR14.suggestedPrice > pRegular.suggestedPrice, 'PR-14 must be > Regular');
+    assert.strictEqual(pRegular.varietyMultiplier, 1.00);
+    assert.strictEqual(p1121.varietyMultiplier, 1.50);
+  });
+
+  // 11. Wheat Variety Pricing Hierarchy
+  test('Pricing: Wheat variety hierarchy (Sharbati > Lokwan > DBW 187 > HD 2967 > Regular)', () => {
+    const pSharbati = serverCalculateFairPrice({ crop: 'wheat', variety: 'Sharbati', quantity: 100 });
+    const pLokwan = serverCalculateFairPrice({ crop: 'wheat', variety: 'Lokwan', quantity: 100 });
+    const pDBW = serverCalculateFairPrice({ crop: 'wheat', variety: 'DBW 187', quantity: 100 });
+    const pHD = serverCalculateFairPrice({ crop: 'wheat', variety: 'HD 2967', quantity: 100 });
+    const pRegular = serverCalculateFairPrice({ crop: 'wheat', variety: 'Regular', quantity: 100 });
+
+    assert(pSharbati.suggestedPrice > pLokwan.suggestedPrice, 'Sharbati must be > Lokwan');
+    assert(pLokwan.suggestedPrice > pDBW.suggestedPrice, 'Lokwan must be > DBW 187');
+    assert(pDBW.suggestedPrice >= pHD.suggestedPrice, 'DBW 187 must be >= HD 2967');
+    assert(pHD.suggestedPrice > pRegular.suggestedPrice, 'HD 2967 must be > Regular');
+    assert.strictEqual(pRegular.varietyMultiplier, 1.00);
+    assert.strictEqual(pSharbati.varietyMultiplier, 1.20);
+  });
+
+  // 12. Chana Dal Variety Pricing Hierarchy
+  test('Pricing: Chana Dal variety hierarchy (Kabuli > Desi > Regular)', () => {
+    const pKabuli = serverCalculateFairPrice({ crop: 'chana_dal', variety: 'Kabuli', quantity: 100 });
+    const pDesi = serverCalculateFairPrice({ crop: 'chana_dal', variety: 'Desi', quantity: 100 });
+    const pRegular = serverCalculateFairPrice({ crop: 'chana_dal', variety: 'Regular', quantity: 100 });
+
+    assert(pKabuli.suggestedPrice > pDesi.suggestedPrice, 'Kabuli must be > Desi');
+    assert(pDesi.suggestedPrice > pRegular.suggestedPrice, 'Desi must be > Regular');
+    assert.strictEqual(pRegular.varietyMultiplier, 1.00);
+    assert.strictEqual(pKabuli.varietyMultiplier, 1.20);
+    assert.strictEqual(pDesi.varietyMultiplier, 1.08);
+  });
+
+  // 13. Toor Dal Variety Pricing Hierarchy
+  test('Pricing: Toor Dal variety hierarchy (Asha > Regular)', () => {
+    const pAsha = serverCalculateFairPrice({ crop: 'toor_dal', variety: 'Asha', quantity: 100 });
+    const pRegular = serverCalculateFairPrice({ crop: 'toor_dal', variety: 'Regular', quantity: 100 });
+
+    assert(pAsha.suggestedPrice > pRegular.suggestedPrice, 'Asha must be > Regular');
+    assert.strictEqual(pRegular.varietyMultiplier, 1.00);
+    assert.strictEqual(pAsha.varietyMultiplier, 1.12);
+  });
+
+  // 14. Deterministic Parity Between Client and Server Price Engines
+  test('Pricing: Deterministic parity between client and server engines', () => {
+    const crops = ['rice', 'wheat', 'chana_dal', 'toor_dal'];
+    for (const c of crops) {
+      const vars = getCropVarieties(c);
+      for (const v of vars) {
+        const clientRes = clientCalculateFairPrice({ crop: c, variety: v, quantity: 250, grade: 'A' });
+        const serverRes = serverCalculateFairPrice({ crop: c, variety: v, quantity: 250, grade: 'A' });
+        assert.strictEqual(
+          clientRes.suggestedPrice,
+          serverRes.suggestedPrice,
+          `Client and server suggested price mismatch for ${c} / ${v}`
+        );
+        assert.strictEqual(
+          clientRes.varietyMultiplier,
+          serverRes.varietyMultiplier,
+          `Client and server multiplier mismatch for ${c} / ${v}`
+        );
+      }
+    }
+  });
+
+  // 15. Quality Grade & Volume Tier Adjustments
+  test('Pricing: Quality grade and volume tier adjustments operate correctly', () => {
+    const pGradeA = serverCalculateFairPrice({ crop: 'wheat', variety: 'Lokwan', quantity: 100, grade: 'A' });
+    const pGradeB = serverCalculateFairPrice({ crop: 'wheat', variety: 'Lokwan', quantity: 100, grade: 'B' });
+    const pGradeC = serverCalculateFairPrice({ crop: 'wheat', variety: 'Lokwan', quantity: 100, grade: 'C' });
+
+    assert(pGradeA.suggestedPrice > pGradeB.suggestedPrice, 'Grade A price must be > Grade B');
+    assert(pGradeB.suggestedPrice > pGradeC.suggestedPrice, 'Grade B price must be > Grade C');
+    assert.strictEqual(pGradeA.gradeMultiplier, 1.20);
+    assert.strictEqual(pGradeB.gradeMultiplier, 1.00);
+    assert.strictEqual(pGradeC.gradeMultiplier, 0.80);
+
+    // Volume tiers: wholesale batch (2000kg) vs retail lot (50kg)
+    const pWholesale = serverCalculateFairPrice({ crop: 'wheat', variety: 'Lokwan', quantity: 2500 });
+    const pRetail = serverCalculateFairPrice({ crop: 'wheat', variety: 'Lokwan', quantity: 50 });
+    assert(pRetail.suggestedPrice > pWholesale.suggestedPrice, 'Small retail lot rate must be > wholesale bulk lot');
+    assert.strictEqual(pWholesale.volumeMultiplier, 0.92);
+    assert.strictEqual(pRetail.volumeMultiplier, 1.05);
+  });
+
+  // 16. Safe Fallbacks & Non-Negative / Non-Zero Guarantee
+  test('Pricing: Safe fallbacks for missing variety and non-negative guarantee', () => {
+    const pNull = serverCalculateFairPrice({ crop: 'rice', variety: null, quantity: 0 });
+    assert(pNull.suggestedPrice > 0, 'Suggested price must be positive');
+    assert.strictEqual(pNull.variety, 'Regular');
+    assert.strictEqual(pNull.varietyMultiplier, 1.00);
+
+    const pInvalid = serverCalculateFairPrice({ crop: 'rice', variety: 'unknown_xyz', quantity: -50 });
+    assert(pInvalid.suggestedPrice > 0, 'Suggested price must be positive despite invalid qty');
+    assert(!isNaN(pInvalid.suggestedPrice), 'Suggested price must not be NaN');
+  });
+
+  // 17. Authoritative Backend Calculation on Listing Creation & Update
+  await asyncTest('Pricing: Authoritative backend recalculation on listing creation & update', async () => {
+    const testListId = 'list_fair_price_test_' + Date.now();
+
+    try {
+      // Farmer submits listing with Basmati Rice and bogus fairPrice
+      const created = await listingStore.createListing({
+        id: testListId,
+        farmerId: 'farmer_fp_test',
+        crop: 'rice',
+        variety: 'Basmati',
+        quantity: 500,
+        price: 50,
+        fairPrice: { suggestedPrice: 1 }, // Bogus client price
+        location: 'Karnal',
+      });
+
+      assert.strictEqual(created.variety, 'Basmati');
+      assert(created.fairPrice, 'Listing must contain server-computed fairPrice');
+      // Expected: 35 * 1.35 * 1.00 * 0.96 = 45.36 -> 45
+      assert.strictEqual(created.fairPrice.varietyMultiplier, 1.35);
+      assert.strictEqual(created.fairPrice.suggestedPrice, 45, 'Server must override client fairPrice with authoritative 45');
+
+      // Update variety to 1121 Basmati
+      const updated = await listingStore.updateListing(testListId, {
+        variety: '1121 Basmati',
+      });
+
+      assert.strictEqual(updated.variety, '1121 Basmati');
+      // Expected: 35 * 1.50 * 1.00 * 0.96 = 50.4 -> 50
+      assert.strictEqual(updated.fairPrice.varietyMultiplier, 1.50);
+      assert.strictEqual(updated.fairPrice.suggestedPrice, 50, 'Server must recalculate fairPrice to 50 on variety update');
+    } finally {
+      // Clean up
+      await listingStore.deleteListing(testListId);
+    }
   });
 
   console.log('\n====================================================');

@@ -1,5 +1,5 @@
-// src/utils/fairPrice.js
-// Deterministic Fair Price Suggestion Engine for SIH 2026
+// server/fairPrice.js
+// Authoritative Server-side Deterministic Fair Price Engine for SIH 2026
 
 import {
   CROP_BASE_PRICES,
@@ -11,13 +11,6 @@ import {
 
 export { CROP_BASE_PRICES }
 
-/**
- * Quality Grade Multipliers based on deterministic AI quality check.
- * Grade A (90-100 score): +20% premium for uniform, defect-free harvest.
- * Grade B (75-89 score):  100% standard commercial market rate.
- * Grade C (0-74 score):   -20% discount for fair/processing grade.
- * Unassessed:             100% standard baseline.
- */
 export const GRADE_MULTIPLIERS = {
   A: 1.20,
   B: 1.00,
@@ -25,10 +18,6 @@ export const GRADE_MULTIPLIERS = {
   default: 1.00,
 }
 
-/**
- * Bulk volume tier adjustment multipliers.
- * Wholesale mandi economics: larger batches have transport and aggregation economies of scale.
- */
 export const QUANTITY_TIERS = [
   { min: 2000, multiplier: 0.92, labelEn: 'large wholesale batch (2000+ kg)', labelHi: 'बड़ा थोक लॉट (2000+ किग्रा)' },
   { min: 500,  multiplier: 0.96, labelEn: 'medium wholesale lot (500-1999 kg)', labelHi: 'मध्यम थोक लॉट (500-1999 किग्रा)' },
@@ -41,11 +30,11 @@ export const QUANTITY_TIERS = [
  * Base Price × Variety Adjustment × Quality Grade Multiplier × Volume Tier Multiplier.
  *
  * @param {Object} params
- * @param {string} params.crop - Crop identifier (e.g. 'rice', 'wheat', 'chana_dal', 'toor_dal')
- * @param {string} [params.variety] - Produce variety (e.g. 'Basmati', '1121 Basmati', 'Sharbati')
- * @param {number|string} [params.quantity] - Produce quantity in kg
- * @param {'A'|'B'|'C'|string|null} [params.grade] - AI Quality Grade if inspected
- * @param {string} [params.lang='en'] - Output language for explanation ('en' | 'hi')
+ * @param {string} params.crop
+ * @param {string} [params.variety]
+ * @param {number|string} [params.quantity]
+ * @param {'A'|'B'|'C'|string|null} [params.grade]
+ * @param {string} [params.lang='en']
  * @returns {{
  *   suggestedPrice: number,
  *   minPrice: number,

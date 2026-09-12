@@ -8,6 +8,14 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import pg from 'pg';
 import { allocateMultiFarmerOrder, normalizeBuyerRequirement } from './matchingEngine.js';
+import {
+  CROP_KEYS,
+  isValidCrop,
+  normalizeCropKey,
+  normalizeVariety,
+} from './cropConstants.js';
+import { calculateFairPrice } from './fairPrice.js';
+import { calculateDeliveryPricing } from './deliveryPricing.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -115,6 +123,15 @@ class ListingStore {
               status VARCHAR(50) DEFAULT 'Payment Secured',
               allocations JSONB DEFAULT '[]',
               requirement JSONB,
+              product_subtotal NUMERIC,
+              delivery_charge NUMERIC,
+              platform_fee NUMERIC DEFAULT 0,
+              discount NUMERIC DEFAULT 0,
+              net_payable NUMERIC,
+              effective_price_per_kg NUMERIC,
+              delivery_status VARCHAR(50),
+              delivery_rule_version VARCHAR(50),
+              calculated_at TIMESTAMPTZ,
               created_at TIMESTAMPTZ DEFAULT NOW(),
               updated_at TIMESTAMPTZ DEFAULT NOW()
             );
@@ -131,6 +148,15 @@ class ListingStore {
             ALTER TABLE orders ADD COLUMN IF NOT EXISTS buyer_location VARCHAR(255);
             ALTER TABLE orders ADD COLUMN IF NOT EXISTS allocations JSONB DEFAULT '[]';
             ALTER TABLE orders ADD COLUMN IF NOT EXISTS requirement JSONB;
+            ALTER TABLE orders ADD COLUMN IF NOT EXISTS product_subtotal NUMERIC;
+            ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_charge NUMERIC;
+            ALTER TABLE orders ADD COLUMN IF NOT EXISTS platform_fee NUMERIC DEFAULT 0;
+            ALTER TABLE orders ADD COLUMN IF NOT EXISTS discount NUMERIC DEFAULT 0;
+            ALTER TABLE orders ADD COLUMN IF NOT EXISTS net_payable NUMERIC;
+            ALTER TABLE orders ADD COLUMN IF NOT EXISTS effective_price_per_kg NUMERIC;
+            ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_status VARCHAR(50);
+            ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_rule_version VARCHAR(50);
+            ALTER TABLE orders ADD COLUMN IF NOT EXISTS calculated_at TIMESTAMPTZ;
           `);
 
           // Purge legacy seed listings
@@ -173,7 +199,7 @@ class ListingStore {
           .filter((item) => !SEED_LISTING_IDS.includes(item.id))
           .map((item) => ({
             ...item,
-            variety: item.variety || null,
+            variety: item.variety || 'Regular',
             reservedQuantity: parseFloat(item.reservedQuantity || item.reserved_quantity || 0),
             availableQuantity: Math.max(
               0,
@@ -195,14 +221,32 @@ class ListingStore {
           this.inMemoryOrders = [];
         }
         // Normalize orders defensively
-        this.inMemoryOrders = this.inMemoryOrders.map((o) => ({
-          ...o,
-          variety: o.variety || null,
-          requestedQuantity: parseFloat(o.requestedQuantity ?? o.quantity ?? 0),
-          fulfilledQuantity: parseFloat(o.fulfilledQuantity ?? o.quantity ?? 0),
-          remainingQuantity: parseFloat(o.remainingQuantity ?? 0),
-          allocations: Array.isArray(o.allocations) ? o.allocations : [],
-        }));
+        this.inMemoryOrders = this.inMemoryOrders.map((o) => {
+          const subtotal = parseFloat(o.productSubtotal ?? o.totalAmount ?? 0);
+          const delCharge = o.deliveryCharge !== undefined && o.deliveryCharge !== null
+            ? parseFloat(o.deliveryCharge)
+            : (subtotal > 2000 ? 0 : (subtotal > 0 ? 40 : 0));
+          const net = parseFloat(o.netPayable ?? (subtotal + delCharge));
+          const qty = parseFloat(o.fulfilledQuantity ?? o.quantity ?? 0);
+          return {
+            ...o,
+            variety: o.variety || null,
+            requestedQuantity: parseFloat(o.requestedQuantity ?? o.quantity ?? 0),
+            fulfilledQuantity: qty,
+            remainingQuantity: parseFloat(o.remainingQuantity ?? 0),
+            allocations: Array.isArray(o.allocations) ? o.allocations : [],
+            productSubtotal: subtotal,
+            deliveryCharge: delCharge,
+            platformFee: parseFloat(o.platformFee ?? 0),
+            discount: parseFloat(o.discount ?? 0),
+            netPayable: net,
+            effectivePricePerKg: parseFloat(o.effectivePricePerKg ?? (qty > 0 ? Math.round((net / qty) * 100) / 100 : 0)),
+            deliveryStatus: o.deliveryStatus || (qty <= 0 ? 'NOT_APPLICABLE' : (subtotal > 2000 ? 'FREE' : 'CHARGED')),
+            deliveryRuleVersion: o.deliveryRuleVersion || 'DLV-001-v1',
+            calculatedAt: o.calculatedAt || o.createdAt || new Date().toISOString(),
+            totalAmount: net,
+          };
+        });
         this.saveLocalOrders();
       } else {
         this.inMemoryOrders = [];
@@ -247,7 +291,7 @@ class ListingStore {
       farmerName: row.farmer_name,
       farmerMobile: row.farmer_mobile,
       crop: row.crop,
-      variety: row.variety || null,
+      variety: row.variety || 'Regular',
       quantity: qty,
       reservedQuantity: reserved,
       availableQuantity: Math.max(0, qty - reserved),
@@ -348,13 +392,27 @@ class ListingStore {
     await this.init();
 
     const id = data.id || 'listing_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7);
+    const normalizedCrop = normalizeCropKey(data.crop) || (data.crop || '').toLowerCase();
+    const canonicalVariety = normalizeVariety(normalizedCrop, data.variety) || 'Regular';
+    const computedFairPrice = calculateFairPrice({
+      crop: normalizedCrop,
+      variety: canonicalVariety,
+      quantity: parseFloat(data.quantity) || 100,
+      grade: data.quality?.grade || null,
+      lang: 'en',
+    });
+    const fairPrice = computedFairPrice ? {
+      ...(typeof data.fairPrice === 'object' && data.fairPrice !== null ? data.fairPrice : {}),
+      ...computedFairPrice,
+    } : (data.fairPrice || null);
+
     const item = {
       id,
       farmerId: data.farmerId || 'demo_farmer',
       farmerName: data.farmerName || 'Farmer',
       farmerMobile: data.farmerMobile || '',
-      crop: (data.crop || '').toLowerCase(),
-      variety: data.variety || null,
+      crop: normalizedCrop,
+      variety: canonicalVariety,
       quantity: parseFloat(data.quantity) || 0,
       reservedQuantity: 0,
       availableQuantity: parseFloat(data.quantity) || 0,
@@ -363,13 +421,13 @@ class ListingStore {
       harvestDate: data.harvestDate || '',
       photo: data.photo || null,
       quality: data.quality || null,
-      fairPrice: data.fairPrice || null,
+      fairPrice,
       pickupDecision: data.pickupDecision || null,
       status: data.status || 'Listed',
       moderationStatus: data.moderationStatus || 'approved',
       traceabilityId:
         data.traceabilityId ||
-        `TRC-${(data.crop || 'CROP').toUpperCase()}-${Date.now().toString().slice(-4)}`,
+        `TRC-${(normalizedCrop || 'CROP').toUpperCase()}-${Date.now().toString().slice(-4)}`,
       createdAt: data.createdAt || new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
@@ -429,6 +487,38 @@ class ListingStore {
     const existing = await this.getListingById(id);
     if (!existing) return null;
 
+    const effectiveUpdates = { ...updates };
+    if (
+      effectiveUpdates.crop !== undefined ||
+      effectiveUpdates.variety !== undefined ||
+      effectiveUpdates.quantity !== undefined ||
+      effectiveUpdates.quality !== undefined
+    ) {
+      const targetCrop = normalizeCropKey(effectiveUpdates.crop || existing.crop) || existing.crop;
+      const targetVariety = normalizeVariety(
+        targetCrop,
+        effectiveUpdates.variety !== undefined ? effectiveUpdates.variety : existing.variety
+      ) || 'Regular';
+      const targetQty = effectiveUpdates.quantity !== undefined
+        ? parseFloat(effectiveUpdates.quantity)
+        : existing.quantity;
+      const targetGrade = (effectiveUpdates.quality?.grade || existing.quality?.grade) || null;
+      const recomputedFairPrice = calculateFairPrice({
+        crop: targetCrop,
+        variety: targetVariety,
+        quantity: targetQty,
+        grade: targetGrade,
+      });
+      if (recomputedFairPrice) {
+        effectiveUpdates.fairPrice = {
+          ...(typeof effectiveUpdates.fairPrice === 'object' && effectiveUpdates.fairPrice !== null ? effectiveUpdates.fairPrice : {}),
+          ...recomputedFairPrice,
+        };
+      }
+      if (effectiveUpdates.crop !== undefined) effectiveUpdates.crop = targetCrop;
+      if (effectiveUpdates.variety !== undefined) effectiveUpdates.variety = targetVariety;
+    }
+
     if (this.isPostgres && this.pool) {
       const allowedKeys = [
         'crop',
@@ -448,7 +538,7 @@ class ListingStore {
       const sets = [];
       const values = [];
 
-      for (const [k, v] of Object.entries(updates)) {
+      for (const [k, v] of Object.entries(effectiveUpdates)) {
         if (!allowedKeys.includes(k)) continue;
         values.push(typeof v === 'object' && v !== null ? JSON.stringify(v) : v);
         const col = k.replace(/([A-Z])/g, '_$1').toLowerCase();
@@ -471,14 +561,14 @@ class ListingStore {
     if (idx === -1) return null;
 
     const current = this.inMemoryListings[idx];
-    const newQty = updates.quantity !== undefined ? parseFloat(updates.quantity) : current.quantity;
-    const newReserved = updates.reservedQuantity !== undefined
-      ? parseFloat(updates.reservedQuantity)
+    const newQty = effectiveUpdates.quantity !== undefined ? parseFloat(effectiveUpdates.quantity) : current.quantity;
+    const newReserved = effectiveUpdates.reservedQuantity !== undefined
+      ? parseFloat(effectiveUpdates.reservedQuantity)
       : (current.reservedQuantity || 0);
 
     this.inMemoryListings[idx] = {
       ...current,
-      ...updates,
+      ...effectiveUpdates,
       quantity: newQty,
       reservedQuantity: newReserved,
       availableQuantity: Math.max(0, newQty - newReserved),
@@ -531,6 +621,21 @@ class ListingStore {
       req = row.requirement;
     }
 
+    const productSubtotal = parseFloat(row.product_subtotal ?? row.total_amount ?? 0);
+    const deliveryCharge = row.delivery_charge !== undefined && row.delivery_charge !== null
+      ? parseFloat(row.delivery_charge)
+      : (productSubtotal > 2000 ? 0 : (productSubtotal > 0 ? 40 : 0));
+    const platformFee = parseFloat(row.platform_fee ?? 0);
+    const discount = parseFloat(row.discount ?? 0);
+    const netPayable = parseFloat(row.net_payable ?? (productSubtotal + deliveryCharge + platformFee - discount));
+    const actualDeliveredQuantity = parseFloat(row.fulfilled_quantity ?? row.quantity ?? 0);
+    const effectivePricePerKg = parseFloat(
+      row.effective_price_per_kg ?? (actualDeliveredQuantity > 0 ? Math.round((netPayable / actualDeliveredQuantity) * 100) / 100 : 0)
+    );
+    const deliveryStatus = row.delivery_status || (actualDeliveredQuantity <= 0 ? 'NOT_APPLICABLE' : (productSubtotal > 2000 ? 'FREE' : 'CHARGED'));
+    const deliveryRuleVersion = row.delivery_rule_version || 'DLV-001-v1';
+    const calculatedAt = row.calculated_at ? new Date(row.calculated_at).toISOString() : (row.created_at || new Date().toISOString());
+
     return {
       id: row.id,
       orderId: row.id,
@@ -541,14 +646,23 @@ class ListingStore {
       listingId: row.listing_id || (allocations[0]?.listingId || null),
       crop: row.crop,
       variety: row.variety || (allocations[0]?.variety || null),
-      quantity: parseFloat(row.quantity || row.fulfilled_quantity || 0),
-      quantityKg: parseFloat(row.quantity || row.fulfilled_quantity || 0),
+      quantity: actualDeliveredQuantity,
+      quantityKg: actualDeliveredQuantity,
       requestedQuantity: parseFloat(row.requested_quantity ?? row.quantity ?? 0),
-      fulfilledQuantity: parseFloat(row.fulfilled_quantity ?? row.quantity ?? 0),
+      fulfilledQuantity: actualDeliveredQuantity,
       remainingQuantity: parseFloat(row.remaining_quantity || 0),
       pricePerKg: parseFloat(row.price_per_kg || 0),
       ratePerKg: parseFloat(row.price_per_kg || 0),
-      totalAmount: parseFloat(row.total_amount || 0),
+      productSubtotal,
+      deliveryCharge,
+      platformFee,
+      discount,
+      netPayable,
+      effectivePricePerKg,
+      deliveryStatus,
+      deliveryRuleVersion,
+      calculatedAt,
+      totalAmount: netPayable,
       farmerId: row.farmer_id || (allocations[0]?.farmerId || null),
       farmerName: row.farmer_name || (allocations[0]?.farmerName || null),
       farmerMobile: row.farmer_mobile || (allocations[0]?.farmerMobile || null),
@@ -686,7 +800,14 @@ class ListingStore {
         });
       }
 
-      // 5. Create Parent Order
+      // 5. Authoritatively Calculate DLV-001 Delivery Pricing from confirmed allocations
+      const deliveryPricing = calculateDeliveryPricing({
+        allocations: plan.allocations,
+        productSubtotal: plan.totalAmount,
+        actualDeliveredQuantity: plan.fulfilledQuantity,
+      });
+
+      // 6. Create Parent Order
       const orderId = 'ORD_' + Date.now().toString().slice(-6) + '_' + Math.random().toString(36).substring(2, 6);
       const parentOrder = {
         id: orderId,
@@ -704,7 +825,16 @@ class ListingStore {
         remainingQuantity: plan.remainingQuantity,
         pricePerKg: plan.weightedAveragePrice,
         ratePerKg: plan.weightedAveragePrice,
-        totalAmount: plan.totalAmount,
+        productSubtotal: deliveryPricing.productSubtotal,
+        deliveryCharge: deliveryPricing.deliveryCharge,
+        platformFee: deliveryPricing.platformFee,
+        discount: deliveryPricing.discount,
+        netPayable: deliveryPricing.netPayable,
+        effectivePricePerKg: deliveryPricing.effectivePricePerKg,
+        deliveryStatus: deliveryPricing.deliveryStatus,
+        deliveryRuleVersion: deliveryPricing.deliveryRuleVersion,
+        calculatedAt: deliveryPricing.calculatedAt,
+        totalAmount: deliveryPricing.netPayable,
         matchStatus: plan.matchStatus,
         fulfillmentStatus: plan.fulfillmentStatus === 'FULFILLED' ? 'PAYMENT_SECURED' : 'PARTIAL',
         status: plan.fulfillmentStatus === 'FULFILLED' ? 'Payment Secured' : 'Partially Fulfilled',
@@ -722,8 +852,11 @@ class ListingStore {
               id, buyer_id, buyer_name, buyer_mobile, buyer_location, crop,
               variety, quantity, requested_quantity, fulfilled_quantity,
               remaining_quantity, price_per_kg, total_amount, fulfillment_status,
-              status, allocations, requirement, created_at, updated_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+              status, allocations, requirement, product_subtotal, delivery_charge,
+              platform_fee, discount, net_payable, effective_price_per_kg,
+              delivery_status, delivery_rule_version, calculated_at,
+              created_at, updated_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28)
           `;
           await client.query(q, [
             parentOrder.id,
@@ -743,6 +876,15 @@ class ListingStore {
             parentOrder.status,
             JSON.stringify(parentOrder.allocations),
             JSON.stringify(parentOrder.requirement),
+            parentOrder.productSubtotal,
+            parentOrder.deliveryCharge,
+            parentOrder.platformFee,
+            parentOrder.discount,
+            parentOrder.netPayable,
+            parentOrder.effectivePricePerKg,
+            parentOrder.deliveryStatus,
+            parentOrder.deliveryRuleVersion,
+            parentOrder.calculatedAt,
             parentOrder.createdAt,
             parentOrder.updatedAt,
           ]);
@@ -909,9 +1051,22 @@ class ListingStore {
       targetOrder.quantity = targetOrder.fulfilledQuantity;
       targetOrder.quantityKg = targetOrder.fulfilledQuantity;
       targetOrder.remainingQuantity = Math.max(0, Math.round((targetOrder.requestedQuantity - targetOrder.fulfilledQuantity) * 100) / 100);
-      targetOrder.totalAmount = Math.round(activeTotal * 100) / 100;
+      targetOrder.productSubtotal = Math.round(activeTotal * 100) / 100;
+
+      // Recalculate DLV-001 delivery pricing based on updated active total
+      const dlvPricing = calculateDeliveryPricing(targetOrder.productSubtotal, targetOrder.fulfilledQuantity);
+      targetOrder.deliveryCharge = dlvPricing.deliveryCharge;
+      targetOrder.platformFee = dlvPricing.platformFee;
+      targetOrder.discount = dlvPricing.discount;
+      targetOrder.netPayable = dlvPricing.netPayable;
+      targetOrder.totalAmount = dlvPricing.netPayable;
+      targetOrder.effectivePricePerKg = dlvPricing.effectivePricePerKg;
+      targetOrder.deliveryStatus = dlvPricing.deliveryStatus;
+      targetOrder.deliveryRuleVersion = dlvPricing.deliveryRuleVersion;
+      targetOrder.calculatedAt = dlvPricing.calculatedAt;
+
       targetOrder.pricePerKg = targetOrder.fulfilledQuantity > 0
-        ? Math.round((targetOrder.totalAmount / targetOrder.fulfilledQuantity) * 100) / 100
+        ? Math.round((targetOrder.productSubtotal / targetOrder.fulfilledQuantity) * 100) / 100
         : targetOrder.pricePerKg;
 
       if (targetOrder.remainingQuantity === 0) {
@@ -952,8 +1107,17 @@ class ListingStore {
           fulfillment_status = $7,
           status = $8,
           allocations = $9,
-          updated_at = $10
-        WHERE id = $11
+          updated_at = $10,
+          product_subtotal = $11,
+          delivery_charge = $12,
+          platform_fee = $13,
+          discount = $14,
+          net_payable = $15,
+          effective_price_per_kg = $16,
+          delivery_status = $17,
+          delivery_rule_version = $18,
+          calculated_at = $19
+        WHERE id = $20
       `;
       const client = await this.pool.connect();
       try {
@@ -968,6 +1132,15 @@ class ListingStore {
           order.status,
           JSON.stringify(order.allocations),
           order.updatedAt,
+          order.productSubtotal,
+          order.deliveryCharge,
+          order.platformFee,
+          order.discount,
+          order.netPayable,
+          order.effectivePricePerKg,
+          order.deliveryStatus,
+          order.deliveryRuleVersion,
+          order.calculatedAt,
           order.id,
         ]);
       } finally {

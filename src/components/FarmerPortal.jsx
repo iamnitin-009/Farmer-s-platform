@@ -250,10 +250,11 @@ export default function FarmerPortal({ onNavigate, session, onLogout }) {
 
   const availableVarieties = crop ? getCropVarieties(crop) : []
 
-  // Deterministic AI Fair Price calculation based on crop baseline, grade, and volume
+  // Deterministic AI Fair Price calculation based on crop, variety, baseline, grade, and volume
   const fairPriceResult = crop
     ? calculateFairPrice({
         crop,
+        variety,
         quantity,
         grade: qualityResult?.grade,
         lang,
@@ -501,6 +502,12 @@ export default function FarmerPortal({ onNavigate, session, onLogout }) {
             maxPrice: fairPriceResult.maxPrice,
             grade: fairPriceResult.grade,
             basePrice: fairPriceResult.basePrice,
+            variety: fairPriceResult.variety,
+            varietySlug: fairPriceResult.varietySlug,
+            varietyMultiplier: fairPriceResult.varietyMultiplier,
+            gradeMultiplier: fairPriceResult.gradeMultiplier,
+            volumeMultiplier: fairPriceResult.volumeMultiplier,
+            explanation: fairPriceResult.explanation,
           }
         : null,
       pickupDecision: pickupDecision && pickupDecision.method
@@ -814,6 +821,7 @@ export default function FarmerPortal({ onNavigate, session, onLogout }) {
                         setCrop(newCrop)
                         const vars = getCropVarieties(newCrop)
                         setVariety(vars[0] || 'Regular')
+                        setPriceApplied(false)
                         if (errors.crop) setErrors((prev) => ({ ...prev, crop: undefined }))
                       }}
                     >
@@ -837,7 +845,10 @@ export default function FarmerPortal({ onNavigate, session, onLogout }) {
                         id="varietySelect"
                         className="form-input form-select"
                         value={variety}
-                        onChange={(e) => setVariety(e.target.value)}
+                        onChange={(e) => {
+                          setVariety(e.target.value)
+                          setPriceApplied(false)
+                        }}
                       >
                         {availableVarieties.map((v) => (
                           <option key={v} value={v}>

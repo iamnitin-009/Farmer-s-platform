@@ -7,6 +7,7 @@ import {
   normalizeVariety,
   getCropVarieties,
 } from './cropConstants.js';
+import { calculateDeliveryPricing } from './deliveryPricing.js';
 
 export function normalizeLocationTokens(loc) {
   if (!loc || typeof loc !== 'string') return [];
@@ -268,6 +269,7 @@ export function scoreListingMatch(listing, requirement) {
 
 function allocateSingleVarietyPlan(normReq, candidates = [], totalCandidateCount = candidates.length) {
   if (candidates.length === 0 || normReq.quantity <= 0) {
+    const deliveryInfo = calculateDeliveryPricing({ productSubtotal: 0, actualDeliveredQuantity: 0 });
     return {
       requirement: normReq,
       requestedQuantity: normReq.quantity,
@@ -281,6 +283,17 @@ function allocateSingleVarietyPlan(normReq, candidates = [], totalCandidateCount
       allocations: [],
       candidateCount: totalCandidateCount,
       eligibleCount: 0,
+      productSubtotal: 0,
+      deliveryCharge: 0,
+      platformFee: 0,
+      discount: 0,
+      netPayable: 0,
+      effectivePricePerKg: 0,
+      deliveryStatus: 'NOT_APPLICABLE',
+      freeDeliveryEligible: false,
+      amountNeededForFreeDelivery: deliveryInfo.amountNeededForFreeDelivery,
+      deliveryRuleVersion: deliveryInfo.deliveryRuleVersion,
+      deliveryExplanation: deliveryInfo.explanation,
     };
   }
 
@@ -348,6 +361,12 @@ function allocateSingleVarietyPlan(normReq, candidates = [], totalCandidateCount
   const fulfillmentStatus = remainingQuantity === 0 ? 'FULFILLED' : (fulfilledQuantity > 0 ? 'PARTIAL' : 'UNFULFILLED');
   const weightedAveragePrice = fulfilledQuantity > 0 ? Math.round((totalAmount / fulfilledQuantity) * 100) / 100 : 0;
 
+  const deliveryInfo = calculateDeliveryPricing({
+    allocations,
+    productSubtotal: totalAmount,
+    actualDeliveredQuantity: fulfilledQuantity,
+  });
+
   return {
     requirement: normReq,
     requestedQuantity: normReq.quantity,
@@ -361,6 +380,17 @@ function allocateSingleVarietyPlan(normReq, candidates = [], totalCandidateCount
     allocations,
     candidateCount: totalCandidateCount,
     eligibleCount: candidates.length,
+    productSubtotal: deliveryInfo.productSubtotal,
+    deliveryCharge: deliveryInfo.deliveryCharge,
+    platformFee: deliveryInfo.platformFee,
+    discount: deliveryInfo.discount,
+    netPayable: deliveryInfo.netPayable,
+    effectivePricePerKg: deliveryInfo.effectivePricePerKg,
+    deliveryStatus: deliveryInfo.deliveryStatus,
+    freeDeliveryEligible: deliveryInfo.freeDeliveryEligible,
+    amountNeededForFreeDelivery: deliveryInfo.amountNeededForFreeDelivery,
+    deliveryRuleVersion: deliveryInfo.deliveryRuleVersion,
+    deliveryExplanation: deliveryInfo.explanation,
   };
 }
 
@@ -369,6 +399,7 @@ export function allocateMultiFarmerOrder(requirement, listings = [], excludedFar
   const eligible = listings.filter((l) => checkListingEligibility(l, normReq, excludedFarmerIds).eligible);
 
   if (eligible.length === 0 || normReq.quantity <= 0) {
+    const deliveryInfo = calculateDeliveryPricing({ productSubtotal: 0, actualDeliveredQuantity: 0 });
     return {
       requirement: normReq,
       requestedQuantity: normReq.quantity,
@@ -382,6 +413,17 @@ export function allocateMultiFarmerOrder(requirement, listings = [], excludedFar
       allocations: [],
       candidateCount: listings.length,
       eligibleCount: 0,
+      productSubtotal: 0,
+      deliveryCharge: 0,
+      platformFee: 0,
+      discount: 0,
+      netPayable: 0,
+      effectivePricePerKg: 0,
+      deliveryStatus: 'NOT_APPLICABLE',
+      freeDeliveryEligible: false,
+      amountNeededForFreeDelivery: deliveryInfo.amountNeededForFreeDelivery,
+      deliveryRuleVersion: deliveryInfo.deliveryRuleVersion,
+      deliveryExplanation: deliveryInfo.explanation,
     };
   }
 

@@ -18,8 +18,12 @@ import {
   isValidCrop,
   normalizeCropKey,
   CROP_VARIETIES,
+  normalizeVariety,
 } from './server/cropConstants.js';
+import { calculateFairPrice } from './server/fairPrice.js';
 import { allocateMultiFarmerOrder } from './server/matchingEngine.js';
+import { calculateDeliveryPricing } from './server/deliveryPricing.js';
+import { MIN_DELIVERY_CHARGE, FREE_DELIVERY_THRESHOLD } from './server/deliveryConstants.js';
 
 dotenv.config();
 const __filename = fileURLToPath(import.meta.url);
@@ -127,6 +131,32 @@ app.get('/api/listings/:id', async (req, res) => {
   }
 });
 
+// GET /api/fair-price - Calculate deterministic fair price for crop & variety
+app.get('/api/fair-price', (req, res) => {
+  try {
+    const { crop, variety, quantity, grade, lang } = req.query;
+    const normalizedCrop = normalizeCropKey(crop);
+    if (!normalizedCrop) {
+      return res.status(400).json({
+        success: false,
+        error: `Invalid or missing crop. Must be one of: ${SUPPORTED_CROPS.join(', ')}`,
+      });
+    }
+    const canonicalVariety = normalizeVariety(normalizedCrop, variety) || 'Regular';
+    const fairPrice = calculateFairPrice({
+      crop: normalizedCrop,
+      variety: canonicalVariety,
+      quantity,
+      grade,
+      lang: lang || 'en',
+    });
+    return res.json({ success: true, fairPrice });
+  } catch (err) {
+    console.error('[Error] GET /api/fair-price failure:', err);
+    res.status(500).json({ success: false, error: 'Failed to calculate fair price' });
+  }
+});
+
 // 3. POST /api/listings - Create listing
 app.post('/api/listings', async (req, res) => {
   try {
@@ -163,6 +193,8 @@ app.post('/api/listings', async (req, res) => {
       });
     }
 
+    const canonicalVariety = normalizeVariety(normalizedCrop, variety) || 'Regular';
+
     const numQty = parseFloat(quantity);
     if (!quantity || isNaN(numQty) || numQty <= 0) {
       return res.status(400).json({ success: false, error: 'Quantity must be a positive number' });
@@ -177,20 +209,33 @@ app.post('/api/listings', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Location is required' });
     }
 
+    const computedFairPrice = calculateFairPrice({
+      crop: normalizedCrop,
+      variety: canonicalVariety,
+      quantity: numQty,
+      grade: quality?.grade || quality?.manualGrade || null,
+      lang: 'en',
+    });
+
+    const finalFairPrice = computedFairPrice ? {
+      ...(typeof fairPrice === 'object' && fairPrice !== null ? fairPrice : {}),
+      ...computedFairPrice,
+    } : (fairPrice || null);
+
     const newListing = await listingStore.createListing({
       id,
       farmerId: user.id || req.body.farmerId || 'demo_farmer',
       farmerName: user.name || req.body.farmerName || 'Farmer',
       farmerMobile: user.mobile || req.body.farmerMobile || '',
       crop: normalizedCrop,
-      variety: variety || null,
+      variety: canonicalVariety,
       quantity: numQty,
       price: numPrice,
       location: String(location).trim(),
       harvestDate: harvestDate || new Date().toISOString().split('T')[0],
       photo: photo || null,
       quality: quality || null,
-      fairPrice: fairPrice || null,
+      fairPrice: finalFairPrice,
       pickupDecision: pickupDecision || null,
       traceabilityId: traceabilityId || null,
       status: 'Listed',
@@ -379,6 +424,29 @@ app.post('/api/match', async (req, res) => {
   } catch (err) {
     console.error('[Error] POST /api/match failure:', err);
     res.status(500).json({ success: false, error: 'Matching calculation failed' });
+  }
+});
+
+// DLV-001 Delivery Pricing Calculation & Policy endpoint
+app.get('/api/delivery-pricing', (req, res) => {
+  try {
+    const subtotal = req.query.subtotal !== undefined ? req.query.subtotal : req.query.productSubtotal;
+    const quantity = req.query.quantity !== undefined ? req.query.quantity : req.query.quantityKg;
+    const lang = req.query.lang || 'en';
+
+    const pricing = calculateDeliveryPricing(subtotal, quantity, { lang });
+    res.json({
+      success: true,
+      pricing,
+      policy: {
+        minDeliveryCharge: MIN_DELIVERY_CHARGE,
+        freeDeliveryThreshold: FREE_DELIVERY_THRESHOLD,
+        rule: `productSubtotal > ${FREE_DELIVERY_THRESHOLD} => FREE (₹0), otherwise ₹${MIN_DELIVERY_CHARGE}`,
+      },
+    });
+  } catch (err) {
+    console.error('[Error] GET /api/delivery-pricing failure:', err);
+    res.status(400).json({ success: false, error: err.message });
   }
 });
 

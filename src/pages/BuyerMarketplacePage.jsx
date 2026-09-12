@@ -16,6 +16,7 @@ import { predictCropDemand, getDemandBadgeStyle } from '../utils/demandPredictio
 import { fetchListings, updateListing as apiUpdateListing } from '../utils/listingService.js'
 import { CROP_KEYS, getCropVarieties } from '../utils/cropConstants.js'
 import { allocateMultiFarmerOrder } from '../utils/buyerMatching.js'
+import { calculateDeliveryPricing } from '../utils/deliveryPricing.js'
 
 function EscrowTimeline({ fulfillmentStatus, t }) {
   const steps = [
@@ -998,15 +999,26 @@ export default function BuyerMarketplacePage({ onNavigate, session }) {
                             <span className="om-val">{order.quantity} kg</span>
                           </div>
                           <div className="order-metric">
-                            <span className="om-label">{mktT.orderPrice}</span>
-                            <span className="om-val">₹{order.pricePerKg} {mktT.perKg}</span>
+                            <span className="om-label">{mktT.productSubtotal || 'Subtotal'}</span>
+                            <span className="om-val">₹{(order.productSubtotal ?? (order.quantity * order.pricePerKg)).toLocaleString('en-IN')}</span>
                           </div>
-                          <div className="order-metric highlight">
-                            <span className="om-label">{mktT.orderTotal}</span>
-                            <span className="om-val total">
-                              ₹{order.totalAmount.toLocaleString('en-IN')}
+                          <div className="order-metric">
+                            <span className="om-label">{mktT.deliveryCharge || 'Delivery'}</span>
+                            <span className="om-val" style={{ color: (order.deliveryCharge === 0) ? '#16a34a' : 'inherit', fontWeight: 'bold' }}>
+                              {order.deliveryCharge === 0 ? (mktT.freeDelivery || 'FREE') : `₹${order.deliveryCharge || 40}`}
                             </span>
                           </div>
+                          <div className="order-metric highlight">
+                            <span className="om-label">{mktT.netPayable || mktT.orderTotal}</span>
+                            <span className="om-val total">
+                              ₹{(order.netPayable ?? order.totalAmount).toLocaleString('en-IN')}
+                            </span>
+                          </div>
+                          {order.effectivePricePerKg && (
+                            <div className="order-metric" style={{ gridColumn: '1 / -1', background: '#f0fdf4', padding: '4px 8px', borderRadius: '4px', fontSize: '0.8rem', color: '#166534', textAlign: 'center' }}>
+                              <span>{mktT.effectivePricePerKg || 'Effective Rate'}: <strong>₹{order.effectivePricePerKg}/kg</strong></span>
+                            </div>
+                          )}
                         </div>
 
                         {order.farmerLocation && (
@@ -1440,12 +1452,44 @@ export default function BuyerMarketplacePage({ onNavigate, session }) {
                     </strong>
                   </div>
                 )}
-                <div className="calc-row total-row">
-                  <span>{escrowT.total || mktT.orderTotal}:</span>
-                  <span className="total-amount">
-                    ₹{((parseFloat(orderQuantity) || 0) * (orderingListing.price ?? orderingListing.expectedPrice ?? 0)).toLocaleString('en-IN')}
-                  </span>
-                </div>
+                {(() => {
+                  const qty = parseFloat(orderQuantity) || 0
+                  const unitPrice = orderingListing.price ?? orderingListing.expectedPrice ?? 0
+                  const subtotal = Math.round(qty * unitPrice * 100) / 100
+                  const dlv = calculateDeliveryPricing(subtotal, qty, { lang })
+
+                  return (
+                    <>
+                      <div className="calc-row">
+                        <span>{mktT.productSubtotal || 'Produce Subtotal'}:</span>
+                        <strong>₹{subtotal.toLocaleString('en-IN')}</strong>
+                      </div>
+                      <div className="calc-row">
+                        <span>{mktT.deliveryCharge || 'Delivery Charge'}:</span>
+                        <strong style={{ color: dlv.deliveryCharge === 0 ? '#16a34a' : 'inherit' }}>
+                          {dlv.deliveryCharge === 0 ? (mktT.freeDelivery || 'FREE') : `₹${dlv.deliveryCharge}`}
+                        </strong>
+                      </div>
+                      <div className="calc-row total-row">
+                        <span>{mktT.netPayable || 'Net Payable'}:</span>
+                        <span className="total-amount">
+                          ₹{dlv.netPayable.toLocaleString('en-IN')}
+                        </span>
+                      </div>
+                      {dlv.effectivePricePerKg !== null && (
+                        <div className="calc-row" style={{ fontSize: '0.85rem', color: '#166534', background: '#f0fdf4', padding: '6px 8px', borderRadius: '4px', marginTop: '4px' }}>
+                          <span>{mktT.effectivePricePerKg || 'Effective Rate'}:</span>
+                          <strong>₹{dlv.effectivePricePerKg}/kg</strong>
+                        </div>
+                      )}
+                      {dlv.deliveryCharge > 0 && dlv.amountNeededForFreeDelivery > 0 && (
+                        <div style={{ fontSize: '0.78rem', color: '#b45309', background: '#fef3c7', padding: '4px 8px', borderRadius: '4px', marginTop: '6px' }}>
+                          ⚡ {mktT.addMoreForFreeDelivery ? mktT.addMoreForFreeDelivery.replace('{amount}', dlv.amountNeededForFreeDelivery) : `Add ₹${dlv.amountNeededForFreeDelivery} more for FREE delivery!`}
+                        </div>
+                      )}
+                    </>
+                  )
+                })()}
               </div>
 
               {/* Escrow Guarantee Notice */}
@@ -1454,7 +1498,13 @@ export default function BuyerMarketplacePage({ onNavigate, session }) {
                 <div>
                   <strong>{escrowT.simulatedEscrow || 'Simulated Escrow'}:</strong>{' '}
                   <span>
-                    ₹{((parseFloat(orderQuantity) || 0) * (orderingListing.price ?? orderingListing.expectedPrice ?? 0)).toLocaleString('en-IN')}{' '}
+                    ₹{(() => {
+                      const qty = parseFloat(orderQuantity) || 0
+                      const unitPrice = orderingListing.price ?? orderingListing.expectedPrice ?? 0
+                      const subtotal = Math.round(qty * unitPrice * 100) / 100
+                      const dlv = calculateDeliveryPricing(subtotal, qty)
+                      return dlv.netPayable.toLocaleString('en-IN')
+                    })()}{' '}
                     {escrowT.escrowNotice || 'will be held securely in demo escrow and released to the farmer only upon delivery verification.'}
                   </span>
                 </div>
@@ -1722,24 +1772,46 @@ export default function BuyerMarketplacePage({ onNavigate, session }) {
                     </span>
                   </div>
 
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '10px', marginBottom: '14px' }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: '10px', marginBottom: '14px' }}>
                     <div style={{ background: '#fff', padding: '10px', borderRadius: '6px', border: '1px solid #e2e8f0' }}>
                       <span style={{ fontSize: '0.75rem', color: '#64748b', display: 'block' }}>{lang === 'hi' ? 'मांग पूर्ति' : 'Fulfilled / Requested'}</span>
-                      <strong style={{ fontSize: '1rem' }}>{multiPlan.fulfilledQuantity} / {multiPlan.requestedQuantity} kg</strong>
+                      <strong style={{ fontSize: '0.95rem' }}>{multiPlan.fulfilledQuantity} / {multiPlan.requestedQuantity} kg</strong>
                     </div>
                     <div style={{ background: '#fff', padding: '10px', borderRadius: '6px', border: '1px solid #e2e8f0' }}>
-                      <span style={{ fontSize: '0.75rem', color: '#64748b', display: 'block' }}>{lang === 'hi' ? 'भारित औसत मूल्य' : 'Weighted Avg Rate'}</span>
-                      <strong style={{ fontSize: '1rem', color: '#16a34a' }}>₹{multiPlan.weightedAveragePrice} / kg</strong>
+                      <span style={{ fontSize: '0.75rem', color: '#64748b', display: 'block' }}>{mktT.productSubtotal || 'Produce Subtotal'}</span>
+                      <strong style={{ fontSize: '0.95rem' }}>₹{(multiPlan.productSubtotal ?? multiPlan.totalEstimatedCost).toLocaleString('en-IN')}</strong>
                     </div>
                     <div style={{ background: '#fff', padding: '10px', borderRadius: '6px', border: '1px solid #e2e8f0' }}>
-                      <span style={{ fontSize: '0.75rem', color: '#64748b', display: 'block' }}>{lang === 'hi' ? 'कुल अनुमानित लागत' : 'Total Estimated Cost'}</span>
-                      <strong style={{ fontSize: '1rem' }}>₹{multiPlan.totalEstimatedCost.toLocaleString('en-IN')}</strong>
+                      <span style={{ fontSize: '0.75rem', color: '#64748b', display: 'block' }}>{mktT.deliveryCharge || 'Delivery Charge'}</span>
+                      <strong style={{ fontSize: '0.95rem', color: (multiPlan.deliveryCharge === 0) ? '#16a34a' : '#b45309' }}>
+                        {multiPlan.deliveryCharge === 0 ? (mktT.freeDelivery || 'FREE') : `₹${multiPlan.deliveryCharge ?? 40}`}
+                      </strong>
                     </div>
                     <div style={{ background: '#fff', padding: '10px', borderRadius: '6px', border: '1px solid #e2e8f0' }}>
-                      <span style={{ fontSize: '0.75rem', color: '#64748b', display: 'block' }}>{lang === 'hi' ? 'आवंटित किसान' : 'Farmers Allocated'}</span>
-                      <strong style={{ fontSize: '1rem' }}>{multiPlan.allocations?.length || 0}</strong>
+                      <span style={{ fontSize: '0.75rem', color: '#64748b', display: 'block' }}>{mktT.netPayable || 'Net Payable'}</span>
+                      <strong style={{ fontSize: '1rem', color: '#166534' }}>₹{(multiPlan.netPayable ?? (multiPlan.totalEstimatedCost + (multiPlan.deliveryCharge ?? 40))).toLocaleString('en-IN')}</strong>
+                    </div>
+                    <div style={{ background: '#fff', padding: '10px', borderRadius: '6px', border: '1px solid #e2e8f0' }}>
+                      <span style={{ fontSize: '0.75rem', color: '#64748b', display: 'block' }}>{mktT.effectivePricePerKg || 'Effective Rate'}</span>
+                      <strong style={{ fontSize: '0.95rem', color: '#0d9488' }}>
+                        {multiPlan.effectivePricePerKg !== undefined && multiPlan.effectivePricePerKg !== null
+                          ? `₹${multiPlan.effectivePricePerKg}/kg`
+                          : `₹${multiPlan.weightedAveragePrice}/kg`}
+                      </strong>
                     </div>
                   </div>
+
+                  {multiPlan.deliveryCharge > 0 && multiPlan.amountNeededForFreeDelivery > 0 && (
+                    <div style={{ fontSize: '0.8rem', color: '#b45309', background: '#fef3c7', padding: '6px 12px', borderRadius: '6px', marginBottom: '12px', fontWeight: '500' }}>
+                      ⚡ {mktT.addMoreForFreeDelivery ? mktT.addMoreForFreeDelivery.replace('{amount}', multiPlan.amountNeededForFreeDelivery) : `Add ₹${multiPlan.amountNeededForFreeDelivery} more to get FREE delivery (orders over ₹2,000)!`}
+                    </div>
+                  )}
+
+                  {multiPlan.deliveryCharge === 0 && (
+                    <div style={{ fontSize: '0.8rem', color: '#15803d', background: '#dcfce7', padding: '6px 12px', borderRadius: '6px', marginBottom: '12px', fontWeight: '500' }}>
+                      🎉 {mktT.freeDeliveryNotice || 'Enjoy FREE delivery on this order!'}
+                    </div>
+                  )}
 
                   {multiPlan.reason && (
                     <div style={{ fontSize: '0.82rem', color: '#475569', marginBottom: '12px' }}>
