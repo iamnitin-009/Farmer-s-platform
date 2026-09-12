@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useLanguage } from '../context/LanguageContext.jsx'
 import {
   aggregateHubLots,
@@ -6,7 +6,7 @@ import {
 } from '../utils/aggregation.js'
 import { getGradeBadgeStyle } from '../utils/quality.js'
 import { IconPin, IconBasket } from '../components/Icons.jsx'
-
+import { fetchListings } from '../utils/listingService.js'
 import { CROP_KEYS, CROP_ICONS } from '../utils/cropConstants.js'
 
 export default function HubAggregationPage({ _session, onNavigate }) {
@@ -18,8 +18,8 @@ export default function HubAggregationPage({ _session, onNavigate }) {
   // Selected crop tab ('all' or specific crop)
   const [selectedCrop, setSelectedCrop] = useState('all')
 
-  // Read listings directly from localStorage
-  const [listings] = useState(() => {
+  // Read listings directly from localStorage with live backend fetch
+  const [listings, setListings] = useState(() => {
     try {
       const raw = localStorage.getItem('sih_farmer_listings')
       return raw ? JSON.parse(raw) : []
@@ -27,6 +27,20 @@ export default function HubAggregationPage({ _session, onNavigate }) {
       return []
     }
   })
+
+  useEffect(() => {
+    let isMounted = true
+    fetchListings({ role: 'admin' })
+      .then((items) => {
+        if (isMounted && Array.isArray(items)) {
+          setListings(items)
+        }
+      })
+      .catch(() => {})
+    return () => {
+      isMounted = false
+    }
+  }, [])
 
   const allAggregations = getAllHubAggregations(listings)
   const currentAggregation = aggregateHubLots(listings, selectedCrop === 'all' ? null : selectedCrop)

@@ -7,6 +7,7 @@ export const FARMER_LISTINGS_KEY = 'sih_farmer_listings';
 function buildAuthHeaders(session, roleOverride) {
   const headers = { 'Content-Type': 'application/json' };
   if (session) {
+    if (session.token) headers['Authorization'] = `Bearer ${session.token}`;
     if (session.id) headers['x-user-id'] = session.id;
     if (session.role || roleOverride) headers['x-user-role'] = roleOverride || session.role;
     if (session.name) headers['x-user-name'] = session.name;
@@ -59,8 +60,8 @@ export async function fetchListings(filters = {}, session = null) {
     if (res.ok) {
       const data = await res.json();
       if (data.success && Array.isArray(data.listings)) {
-        // Sync retrieved listings to local cache
-        if (data.listings.length > 0 || !filters.crop) {
+        // Authoritative backend response: Always update local cache on general query
+        if (!filters.crop && !filters.farmerId && !filters.myListings) {
           setLocalCache(data.listings);
         }
         return data.listings;

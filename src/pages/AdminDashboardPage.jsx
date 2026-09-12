@@ -64,20 +64,39 @@ export default function AdminDashboardPage({ onNavigate, onLogout }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dataVersion])
 
-  // Synchronize full listing catalog from backend on mount
+  // Synchronize full listing catalog and orders from backend on mount
   useEffect(() => {
     let isMounted = true
-    fetchListings({ role: 'admin' })
+    fetchListings({ role: 'admin' }, session)
       .then((serverItems) => {
-        if (isMounted && Array.isArray(serverItems) && serverItems.length > 0) {
+        if (isMounted && Array.isArray(serverItems)) {
           refreshData()
         }
       })
       .catch(() => {})
+
+    // Synchronize orders from backend
+    const headers = { 'Content-Type': 'application/json' }
+    if (session?.token) headers['Authorization'] = `Bearer ${session.token}`
+    if (session?.id) headers['x-user-id'] = session.id
+    if (session?.role) headers['x-user-role'] = session.role
+
+    fetch('/api/orders', { headers })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (isMounted && data?.success && Array.isArray(data.orders)) {
+          try {
+            localStorage.setItem('sih_buyer_orders', JSON.stringify(data.orders))
+            refreshData()
+          } catch {}
+        }
+      })
+      .catch(() => {})
+
     return () => {
       isMounted = false
     }
-  }, [])
+  }, [session])
 
   // All Orders
   const orders = useMemo(() => {

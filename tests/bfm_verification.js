@@ -39,6 +39,9 @@ async function runTests() {
   }
 
   await listingStore.init();
+  const initialOrderIds = new Set((listingStore.inMemoryOrders || []).map((o) => o.id));
+  const initialListingIds = new Set((listingStore.inMemoryListings || []).map((l) => l.id));
+
   if (Array.isArray(listingStore.inMemoryListings)) {
     listingStore.inMemoryListings = listingStore.inMemoryListings.filter(
       (l) => !l.id.startsWith('test_') && !l.id.startsWith('list_fair_price_test_')
@@ -630,6 +633,219 @@ async function runTests() {
       await listingStore.deleteListing(testListId);
     }
   });
+
+  // ====================================================
+  // TARGETED REGRESSION SUITE (STABILIZATION AUDIT FIXES)
+  // ====================================================
+
+  // Regression 1: Direct Buy Atomic Order & Inventory Reservation
+  await asyncTest('Regression 1: Direct Buy atomic flow preserves stock & applies DLV-001', async () => {
+    const listId = 'reg_test_direct_buy_list';
+    const list = await listingStore.createListing({
+      id: listId,
+      farmerId: 'farmer_reg_direct',
+      crop: 'wheat',
+      variety: 'Sharbati',
+      quantity: 100,
+      price: 30,
+      location: 'Nashik',
+    });
+
+    try {
+      const res = await listingStore.createDirectOrder({
+        listingId: listId,
+        quantity: 20,
+        buyerSession: { id: 'buyer_reg_direct', name: 'Direct Buyer' },
+      });
+
+      assert.strictEqual(res.success, true);
+      assert(res.order, 'Order must be created');
+      assert.strictEqual(res.order.quantity, 20);
+      assert.strictEqual(res.order.productSubtotal, 600); // 20 * 30
+      assert.strictEqual(res.order.deliveryCharge, 40);   // 600 <= 2000 => 40
+      assert.strictEqual(res.order.netPayable, 640);
+
+      // Verify listing reservation
+      const refreshed = await listingStore.getListingById(listId);
+      assert.strictEqual(refreshed.quantity, 100);
+      assert.strictEqual(refreshed.reservedQuantity, 20);
+      assert.strictEqual(refreshed.availableQuantity, 80);
+    } finally {
+      await listingStore.deleteListing(listId);
+    }
+  });
+
+  // Regression 2: State Machine Validation on Allocations
+  await asyncTest('Regression 2: State machine blocks invalid allocation transitions', async () => {
+    const listId = 'reg_test_state_list';
+    await listingStore.createListing({
+      id: listId,
+      farmerId: 'farmer_reg_state',
+      crop: 'rice',
+      variety: 'Basmati',
+      quantity: 50,
+      price: 40,
+      location: 'Karnal',
+    });
+
+    try {
+      const orderRes = await listingStore.createDirectOrder({
+        listingId: listId,
+        quantity: 10,
+        buyerSession: { id: 'buyer_state_test' },
+      });
+      assert.strictEqual(orderRes.success, true);
+      const allocId = orderRes.order.allocations[0].allocationId;
+
+      // PENDING -> ACCEPTED
+      const acceptRes1 = await listingStore.acceptAllocation(allocId, 'farmer_reg_state');
+      assert.strictEqual(acceptRes1.success, true);
+      assert.strictEqual(acceptRes1.allocation.status, 'ACCEPTED');
+
+      // ACCEPTED -> ACCEPTED (Idempotent safe response)
+      const acceptRes2 = await listingStore.acceptAllocation(allocId, 'farmer_reg_state');
+      assert.strictEqual(acceptRes2.success, true);
+      assert.strictEqual(acceptRes2.message, 'Allocation already accepted.');
+
+      // ACCEPTED -> REJECTED (Strictly blocked)
+      const rejectAttempt = await listingStore.rejectAllocation(allocId, 'farmer_reg_state');
+      assert.strictEqual(rejectAttempt.success, false);
+      assert(rejectAttempt.error.includes('Cannot reject an allocation that was already accepted'));
+    } finally {
+      await listingStore.deleteListing(listId);
+    }
+  });
+
+  // Regression 3: Authorization Protection on Accept / Reject
+  await asyncTest('Regression 3: Authorization guards close anonymous & wrong-farmer bypass', async () => {
+    const listId = 'reg_test_auth_list';
+    await listingStore.createListing({
+      id: listId,
+      farmerId: 'farmer_target',
+      crop: 'wheat',
+      variety: 'Lokwan',
+      quantity: 50,
+      price: 25,
+      location: 'Indore',
+    });
+
+    try {
+      const orderRes = await listingStore.createDirectOrder({
+        listingId: listId,
+        quantity: 10,
+        buyerSession: { id: 'buyer_auth_test' },
+      });
+      const allocId = orderRes.order.allocations[0].allocationId;
+
+      // Anonymous / null farmerId -> Must be rejected
+      const anonAccept = await listingStore.acceptAllocation(allocId, null);
+      assert.strictEqual(anonAccept.success, false);
+      assert(anonAccept.error.includes('Unauthorized'));
+
+      const anonReject = await listingStore.rejectAllocation(allocId, null);
+      assert.strictEqual(anonReject.success, false);
+      assert(anonReject.error.includes('Unauthorized'));
+
+      // Wrong farmer (Farmer Impostor touching Farmer Target) -> Must be rejected
+      const wrongAccept = await listingStore.acceptAllocation(allocId, 'farmer_impostor');
+      assert.strictEqual(wrongAccept.success, false);
+      assert(wrongAccept.error.includes('Unauthorized'));
+
+      const wrongReject = await listingStore.rejectAllocation(allocId, 'farmer_impostor');
+      assert.strictEqual(wrongReject.success, false);
+      assert(wrongReject.error.includes('Unauthorized'));
+
+      // Legitimate Farmer Target -> Allowed
+      const validAccept = await listingStore.acceptAllocation(allocId, 'farmer_target');
+      assert.strictEqual(validAccept.success, true);
+    } finally {
+      await listingStore.deleteListing(listId);
+    }
+  });
+
+  // Regression 4: Cumulative Reallocation Excludes ALL Past Rejectors
+  await asyncTest('Regression 4: Shortfall reallocation excludes all cumulative previous rejectors', async () => {
+    // Farmer A (50kg @ ₹30, Karnal), Farmer B (50kg @ ₹25, Panipat), Farmer C (50kg @ ₹35, Sonipat)
+    const listA = await listingStore.createListing({ id: 'l_realloc_a', farmerId: 'f_realloc_a', crop: 'rice', variety: 'Sona Masoori', quantity: 50, price: 30, location: 'Karnal' });
+    const listB = await listingStore.createListing({ id: 'l_realloc_b', farmerId: 'f_realloc_b', crop: 'rice', variety: 'Sona Masoori', quantity: 50, price: 25, location: 'Panipat' });
+    const listC = await listingStore.createListing({ id: 'l_realloc_c', farmerId: 'f_realloc_c', crop: 'rice', variety: 'Sona Masoori', quantity: 50, price: 35, location: 'Sonipat' });
+
+    try {
+      // Order 50kg -> Farmer A is closest and gets allocated
+      const orderRes = await listingStore.createMultiFarmerOrder({
+        requirement: { crop: 'rice', variety: 'Sona Masoori', quantity: 50, buyerLocation: 'Karnal' },
+        buyerSession: { id: 'buyer_realloc_test' },
+      });
+      assert.strictEqual(orderRes.success, true);
+      const initialAlloc = orderRes.order.allocations[0];
+      assert.strictEqual(initialAlloc.farmerId, 'f_realloc_a');
+
+      // Farmer A rejects -> reallocated to Farmer B
+      const rejA = await listingStore.rejectAllocation(initialAlloc.allocationId, 'f_realloc_a');
+      assert.strictEqual(rejA.success, true);
+      const bAlloc = rejA.order.allocations.find((a) => a.status === 'PENDING');
+      assert(bAlloc, 'Allocation for Farmer B must exist');
+      assert.strictEqual(bAlloc.farmerId, 'f_realloc_b');
+
+      // Farmer B also rejects -> Must NOT re-offer to Farmer A! Must go to Farmer C!
+      const rejB = await listingStore.rejectAllocation(bAlloc.allocationId, 'f_realloc_b');
+      assert.strictEqual(rejB.success, true);
+      const cAlloc = rejB.order.allocations.find((a) => a.status === 'PENDING');
+      assert(cAlloc, 'Allocation for Farmer C must exist');
+      assert.strictEqual(cAlloc.farmerId, 'f_realloc_c', 'Reallocation must choose unrejected Farmer C, NOT Farmer A');
+    } finally {
+      await listingStore.deleteListing('l_realloc_a');
+      await listingStore.deleteListing('l_realloc_b');
+      await listingStore.deleteListing('l_realloc_c');
+    }
+  });
+
+  // Regression 5: Authoritative Traceability Data Retrieval
+  await asyncTest('Regression 5: getTraceabilityData resolves lot across listings and orders', async () => {
+    const listId = 'reg_trace_listing_01';
+    const traceId = 'TRC-2026-REGTEST99';
+    await listingStore.createListing({
+      id: listId,
+      farmerId: 'farmer_trace_test',
+      farmerName: 'Sunita Devi',
+      crop: 'wheat',
+      variety: 'Sharbati',
+      quantity: 50,
+      price: 32,
+      location: 'Karnal, Haryana',
+      traceabilityId: traceId,
+    });
+
+    try {
+      // Lookup by traceabilityId
+      const traceData = await listingStore.getTraceabilityData(traceId);
+      assert(traceData, 'Traceability data must be resolved');
+      assert.strictEqual(traceData.traceabilityId, traceId);
+      assert.strictEqual(traceData.crop, 'Wheat');
+      assert.strictEqual(traceData.variety, 'Sharbati');
+      assert.strictEqual(traceData.stages.farmerListing.farmerName, 'Sunita Devi');
+      assert.strictEqual(traceData.stages.quality.isComplete, true);
+      assert.strictEqual(traceData.stages.logistics.isComplete, true);
+
+      // Lookup non-existent ID
+      const missing = await listingStore.getTraceabilityData('TRC-2026-NONEXISTENT');
+      assert.strictEqual(missing, null, 'Non-existent ID must return null (404)');
+    } finally {
+      await listingStore.deleteListing(listId);
+    }
+  });
+
+  // ====================================================
+  // TEARDOWN: ISOLATE AND CLEAN UP TEST DATA (FIX 13)
+  // ====================================================
+  if (Array.isArray(listingStore.inMemoryOrders)) {
+    listingStore.inMemoryOrders = listingStore.inMemoryOrders.filter((o) => initialOrderIds.has(o.id));
+    listingStore.saveLocalOrders();
+  }
+  if (Array.isArray(listingStore.inMemoryListings)) {
+    listingStore.inMemoryListings = listingStore.inMemoryListings.filter((l) => initialListingIds.has(l.id));
+    listingStore.saveLocalStore();
+  }
 
   console.log('\n====================================================');
   console.log(`  VERIFICATION RESULTS: ${passed} PASSED, ${failed} FAILED`);

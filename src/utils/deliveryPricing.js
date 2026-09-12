@@ -76,13 +76,13 @@ export class FixedDeliveryStrategy {
       subtotal = Math.round(rawSubtotal * 100) / 100;
     }
 
-    if (deliveredQty <= 0 && subtotal <= 0) {
+    if (subtotal <= 0) {
       return {
         productSubtotal: 0,
-        deliveryCharge: this.minDeliveryCharge,
-        platformFee: this.platformFee,
-        discount: this.discount,
-        netPayable: this.minDeliveryCharge + this.platformFee - this.discount,
+        deliveryCharge: 0,
+        platformFee: 0,
+        discount: 0,
+        netPayable: 0,
         actualDeliveredQuantity: 0,
         effectivePricePerKg: 'NOT_APPLICABLE',
         deliveryStatus: 'NOT_APPLICABLE',

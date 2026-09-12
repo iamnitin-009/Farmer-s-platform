@@ -121,11 +121,12 @@ async function runTests() {
   });
 
   // Test Case H: Zero quantity or unallocated order
-  test('Case H: Zero quantity / unallocated order => delivery = ₹40, effectivePrice = NOT_APPLICABLE (No NaN/div-by-zero)', () => {
+  test('Case H: Zero quantity / unallocated order => delivery = ₹0, effectivePrice = NOT_APPLICABLE (No NaN/div-by-zero)', () => {
     const res = calculateDeliveryPricing(0, 0);
     assert.strictEqual(res.productSubtotal, 0);
-    assert.strictEqual(res.deliveryCharge, 40);
-    assert.strictEqual(res.netPayable, 40);
+    assert.strictEqual(res.deliveryCharge, 0);
+    assert.strictEqual(res.netPayable, 0);
+    assert.strictEqual(res.deliveryStatus, 'NOT_APPLICABLE');
     assert.strictEqual(res.effectivePricePerKg, 'NOT_APPLICABLE');
     assert.strictEqual(Number.isNaN(res.netPayable), false);
   });
@@ -264,10 +265,14 @@ async function runTests() {
     assert.strictEqual(updatedOrder.effectivePricePerKg, 30.8);
     assert.strictEqual(updatedOrder.deliveryStatus, 'CHARGED');
 
-    // Cleanup test listings
+    // Cleanup test listings and test orders
     if (listingStore.inMemoryListings) {
       listingStore.inMemoryListings = listingStore.inMemoryListings.filter((l) => !l.id.startsWith('dlv_test_'));
       listingStore.saveLocalStore();
+    }
+    if (listingStore.inMemoryOrders) {
+      listingStore.inMemoryOrders = listingStore.inMemoryOrders.filter((o) => o.buyerId !== 'buyer_dlv_test');
+      listingStore.saveLocalOrders();
     }
   });
 

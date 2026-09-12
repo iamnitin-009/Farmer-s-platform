@@ -3,6 +3,7 @@
 
 import express from 'express';
 import dotenv from 'dotenv';
+import crypto from 'crypto';
 import Groq from 'groq-sdk';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -72,26 +73,122 @@ app.get('/api/health', (req, res) => {
 });
 
 // -------------------------------------------------------------
-// Shared Persistent Marketplace Listings API
+// Shared Persistent Marketplace Listings API & Authentication
 // -------------------------------------------------------------
 
-function getReqUser(req) {
-  const headerRole = req.headers['x-user-role'];
-  const queryRole = req.query.role;
-  const headerId = req.headers['x-user-id'];
-  const queryId = req.query.userId;
-  const bodyId = req.body?.farmerId;
+const AUTH_SECRET = process.env.SESSION_SECRET || 'pragati_sih_2026_auth_secret_key_secure';
+const DEFAULT_ADMIN_HASH = 'cabbf34cf45db912b2d9bc8035ceb1b5d82a62c208363149aa10ba5bab641f80';
 
-  const id = headerId || queryId || bodyId || null;
-  let role = (headerRole || queryRole || (id === 'admin' ? 'admin' : 'buyer')).toLowerCase();
+export function createSessionToken(user) {
+  const payload = {
+    id: user.id,
+    role: user.role || 'farmer',
+    name: user.name || 'User',
+    mobile: user.mobile || '',
+    iat: Date.now(),
+    exp: Date.now() + 7 * 24 * 60 * 60 * 1000,
+  };
+  const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  const sig = crypto.createHmac('sha256', AUTH_SECRET).update(body).digest('base64url');
+  return `${body}.${sig}`;
+}
+
+export function verifySessionToken(token) {
+  if (!token || typeof token !== 'string') return null;
+  const parts = token.split('.');
+  if (parts.length !== 2) return null;
+  const [body, sig] = parts;
+  const expectedSig = crypto.createHmac('sha256', AUTH_SECRET).update(body).digest('base64url');
+  if (sig !== expectedSig) return null;
+  try {
+    const payload = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
+    if (payload.exp && Date.now() > payload.exp) return null;
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+function getReqUser(req) {
+  // 1. Check Bearer token in Authorization header
+  const authHeader = req.headers['authorization'];
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    const token = authHeader.slice(7).trim();
+    const verified = verifySessionToken(token);
+    if (verified && verified.id) {
+      return {
+        id: verified.id,
+        role: verified.role,
+        name: verified.name,
+        mobile: verified.mobile,
+        authenticated: true,
+      };
+    }
+  }
+
+  // 2. Client header inspection (for development & test compatibility)
+  const headerId = req.headers['x-user-id'];
+  const headerRole = req.headers['x-user-role'];
+  const id = headerId || null;
+
+  // STRICT SECURITY GUARD:
+  // Admin role is NEVER granted via unauthenticated headers or query parameters!
+  // It requires either a verified token or explicit admin credential check.
+  let role = 'anonymous';
+  if (id) {
+    const claimedRole = (headerRole || 'buyer').toLowerCase();
+    role = claimedRole === 'admin' ? 'anonymous' : claimedRole;
+  }
 
   return {
-    id,
+    id: id || null,
     role,
     name: req.headers['x-user-name'] || req.body?.farmerName || 'User',
     mobile: req.headers['x-user-mobile'] || req.body?.farmerMobile || '',
+    authenticated: Boolean(id && role !== 'anonymous'),
   };
 }
+
+// 0. POST /api/auth/token - Issue cryptographically verified session token
+app.post('/api/auth/token', (req, res) => {
+  try {
+    const { id, role, name, mobile, passwordHash, password } = req.body || {};
+    if (!id) {
+      return res.status(400).json({ success: false, error: 'User ID is required' });
+    }
+
+    let verifiedRole = role || 'farmer';
+
+    // Admin elevation check: MUST match default admin hash or password
+    if (id === 'admin' || verifiedRole === 'admin') {
+      if (passwordHash !== DEFAULT_ADMIN_HASH && password !== 'admin') {
+        return res.status(403).json({ success: false, error: 'Unauthorized: Invalid admin credentials.' });
+      }
+      verifiedRole = 'admin';
+    }
+
+    const token = createSessionToken({
+      id,
+      role: verifiedRole,
+      name: name || (verifiedRole === 'admin' ? 'System Administrator' : 'User'),
+      mobile: mobile || '',
+    });
+
+    res.json({
+      success: true,
+      token,
+      user: {
+        id,
+        role: verifiedRole,
+        name: name || 'User',
+        mobile: mobile || '',
+      },
+    });
+  } catch (err) {
+    console.error('[Error] POST /api/auth/token failure:', err);
+    res.status(500).json({ success: false, error: 'Failed to issue auth token' });
+  }
+});
 
 // 1. GET /api/listings - Retrieve listings
 app.get('/api/listings', async (req, res) => {
@@ -281,7 +378,7 @@ app.put('/api/listings/:id', async (req, res) => {
 
     // Handle buyer order inventory decrement
     if (isBuyerOrderDecrement) {
-      const decAmount = parseFloat(req.body.decrementQuantity || req.body.quantity || 0);
+      const decAmount = parseFloat(req.body.decrementQuantity || 0);
       const remaining = Math.max(0, existing.quantity - decAmount);
       updates = {
         quantity: remaining,
@@ -355,7 +452,7 @@ app.get('/api/demand-prediction', async (req, res) => {
       if (!normalized) {
         return res.status(400).json({
           success: false,
-          error: `Invalid or unsupported crop: "${crop}". Supported crops: Wheat, Rice, Potato, Onion, Tomato, Fruits`,
+          error: `Invalid or unsupported crop: "${crop}". Supported crops: Rice, Wheat, Chana Dal, Toor Dal`,
           crop: crop || 'Unknown',
           cropKey: 'unknown',
           predictedDemand: 0,
@@ -472,13 +569,17 @@ app.post('/api/orders/allocate', async (req, res) => {
   }
 });
 
-// Farmer accepts allocation
+// Farmer accepts allocation (Auth Protected)
 app.post('/api/allocations/:id/accept', async (req, res) => {
   try {
     const user = getReqUser(req);
+    if (!user || !user.id || user.role === 'anonymous') {
+      return res.status(401).json({ success: false, error: 'Unauthorized: Authentication required to accept allocations.' });
+    }
     const result = await listingStore.acceptAllocation(req.params.id, user.id);
     if (!result.success) {
-      return res.status(400).json(result);
+      const status = result.error && result.error.toLowerCase().includes('unauthorized') ? 403 : 400;
+      return res.status(status).json(result);
     }
     res.json(result);
   } catch (err) {
@@ -487,13 +588,17 @@ app.post('/api/allocations/:id/accept', async (req, res) => {
   }
 });
 
-// Farmer rejects allocation -> automatic reallocation
+// Farmer rejects allocation -> automatic reallocation (Auth Protected)
 app.post('/api/allocations/:id/reject', async (req, res) => {
   try {
     const user = getReqUser(req);
+    if (!user || !user.id || user.role === 'anonymous') {
+      return res.status(401).json({ success: false, error: 'Unauthorized: Authentication required to reject allocations.' });
+    }
     const result = await listingStore.rejectAllocation(req.params.id, user.id);
     if (!result.success) {
-      return res.status(400).json(result);
+      const status = result.error && result.error.toLowerCase().includes('unauthorized') ? 403 : 400;
+      return res.status(status).json(result);
     }
     res.json(result);
   } catch (err) {
@@ -502,16 +607,31 @@ app.post('/api/allocations/:id/reject', async (req, res) => {
   }
 });
 
+// Retrieve orders (Auth Protected & Role-Scoped)
 app.get('/api/orders', async (req, res) => {
   try {
     const user = getReqUser(req);
-    const query = { ...req.query };
-    if (!query.buyerId && user.role === 'buyer' && user.id) {
+    if (!user || !user.id || user.role === 'anonymous') {
+      return res.status(401).json({ success: false, error: 'Unauthorized: Authentication required to view orders.' });
+    }
+
+    const query = {};
+    if (user.role === 'admin') {
+      // Admin may inspect all or filter by query parameters
+      if (req.query.buyerId) query.buyerId = req.query.buyerId;
+      if (req.query.farmerId) query.farmerId = req.query.farmerId;
+    } else if (user.role === 'buyer') {
+      // Buyer ONLY gets their own orders - ignore query.buyerId overrides
       query.buyerId = user.id;
-    }
-    if (!query.farmerId && user.role === 'farmer' && user.id) {
+    } else if (user.role === 'farmer') {
+      // Farmer ONLY gets orders where they have allocations - ignore query.farmerId overrides
       query.farmerId = user.id;
+    } else {
+      return res.status(403).json({ success: false, error: 'Forbidden: Insufficient permissions.' });
     }
+
+    if (req.query.crop) query.crop = req.query.crop;
+
     const orders = await listingStore.getAllOrders(query);
     res.json({ success: true, count: orders.length, orders });
   } catch (err) {
@@ -520,27 +640,57 @@ app.get('/api/orders', async (req, res) => {
   }
 });
 
+// Create Order: Single authoritative backend transaction
 app.post('/api/orders', async (req, res) => {
   try {
     const user = getReqUser(req);
-    const requirement = {
-      crop: req.body.crop,
-      quantity: req.body.quantity || req.body.quantityKg,
-      variety: req.body.variety,
-      maxPrice: req.body.pricePerKg,
-      buyerLocation: req.body.buyerLocation || user.location,
-    };
-    const result = await listingStore.createMultiFarmerOrder({
-      requirement,
-      buyerSession: user,
-    });
+    const listingId = req.body.listingId || req.body.listing?.id;
+    const quantity = parseFloat(req.body.quantity || req.body.quantityKg || 0);
+
+    let result;
+    if (listingId) {
+      // Direct Single-Listing Order: Atomic check, reservation & DLV-001 calculation
+      result = await listingStore.createDirectOrder({
+        listingId,
+        quantity,
+        buyerSession: user.id ? user : { id: 'user_fallback', name: 'Verified Buyer' },
+      });
+    } else {
+      // BFM-001 Multi-Farmer Requirement Allocation
+      const requirement = {
+        crop: req.body.crop,
+        quantity,
+        variety: req.body.variety,
+        maxPrice: req.body.pricePerKg,
+        buyerLocation: req.body.buyerLocation || user.location,
+      };
+      result = await listingStore.createMultiFarmerOrder({
+        requirement,
+        buyerSession: user.id ? user : { id: 'user_fallback', name: 'Verified Buyer' },
+      });
+    }
+
     if (!result.success) {
       return res.status(400).json(result);
     }
     res.status(201).json({ success: true, order: result.order });
   } catch (err) {
     console.error('[Error] POST /api/orders failure:', err);
-    res.status(500).json({ success: false, error: 'Failed to create order' });
+    res.status(500).json({ success: false, error: err.message || 'Failed to create order' });
+  }
+});
+
+// Authoritative Farm-to-Fork Traceability API (accessible across devices & browsers)
+app.get('/api/traceability/:id', async (req, res) => {
+  try {
+    const data = await listingStore.getTraceabilityData(req.params.id);
+    if (!data) {
+      return res.status(404).json({ success: false, error: 'Traceability lot not found' });
+    }
+    res.json({ success: true, traceability: data });
+  } catch (err) {
+    console.error('[Error] GET /api/traceability/:id failure:', err);
+    res.status(500).json({ success: false, error: 'Failed to retrieve traceability lot' });
   }
 });
 

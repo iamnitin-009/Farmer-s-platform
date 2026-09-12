@@ -9,6 +9,7 @@ import {
   normalizeVariety,
   getCropVarieties,
 } from './cropConstants.js'
+import { calculateDeliveryPricing } from './deliveryPricing.js'
 
 /**
  * Normalizes a location string into searchable tokens (city, district, state).
@@ -426,6 +427,10 @@ function allocateSingleVarietyPlan(normReq, candidates = [], totalCandidateCount
   const remainingQuantity = Math.max(0, Math.round(remainingDemand * 100) / 100)
   const fulfillmentStatus = remainingQuantity === 0 ? 'FULFILLED' : (fulfilledQuantity > 0 ? 'PARTIAL' : 'UNFULFILLED')
   const weightedAveragePrice = fulfilledQuantity > 0 ? Math.round((totalAmount / fulfilledQuantity) * 100) / 100 : 0
+  const productSubtotal = Math.round(totalAmount * 100) / 100
+
+  // DLV-001 delivery pricing calculation
+  const dlv = calculateDeliveryPricing(productSubtotal, fulfilledQuantity)
 
   return {
     requirement: normReq,
@@ -433,7 +438,19 @@ function allocateSingleVarietyPlan(normReq, candidates = [], totalCandidateCount
     fulfilledQuantity,
     remainingQuantity,
     fulfillmentStatus,
-    totalAmount: Math.round(totalAmount * 100) / 100,
+    productSubtotal,
+    deliveryCharge: dlv.deliveryCharge,
+    platformFee: dlv.platformFee,
+    discount: dlv.discount,
+    netPayable: dlv.netPayable,
+    effectivePricePerKg: dlv.effectivePricePerKg,
+    deliveryStatus: dlv.deliveryStatus,
+    freeDeliveryEligible: dlv.freeDeliveryEligible,
+    amountNeededForFreeDelivery: dlv.amountNeededForFreeDelivery,
+    deliveryExplanation: dlv.explanation,
+    deliveryRuleVersion: dlv.deliveryRuleVersion,
+    totalAmount: dlv.netPayable,
+    totalEstimatedCost: productSubtotal,
     weightedAveragePrice,
     allocations,
     candidateCount: totalCandidateCount,
@@ -446,13 +463,26 @@ export function allocateMultiFarmerOrder(requirement, listings = []) {
   const eligible = filterEligibleListings(listings, normReq)
 
   if (eligible.length === 0 || normReq.quantity <= 0) {
+    const dlv = calculateDeliveryPricing(0, 0)
     return {
       requirement: normReq,
       requestedQuantity: normReq.quantity,
       fulfilledQuantity: 0,
       remainingQuantity: normReq.quantity,
       fulfillmentStatus: 'UNFULFILLED',
+      productSubtotal: 0,
+      deliveryCharge: dlv.deliveryCharge,
+      platformFee: dlv.platformFee,
+      discount: dlv.discount,
+      netPayable: dlv.netPayable,
+      effectivePricePerKg: dlv.effectivePricePerKg,
+      deliveryStatus: dlv.deliveryStatus,
+      freeDeliveryEligible: dlv.freeDeliveryEligible,
+      amountNeededForFreeDelivery: dlv.amountNeededForFreeDelivery,
+      deliveryExplanation: dlv.explanation,
+      deliveryRuleVersion: dlv.deliveryRuleVersion,
       totalAmount: 0,
+      totalEstimatedCost: 0,
       weightedAveragePrice: 0,
       allocations: [],
       candidateCount: listings.length,

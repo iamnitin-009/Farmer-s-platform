@@ -1,5 +1,6 @@
 // src/utils/routeOptimization.js
 // Deterministic Nearest-Neighbor Route Optimization Engine for SIH 2026
+import { CROP_KEYS } from './cropConstants.js'
 
 /**
  * Predefined geographic coordinates [latitude, longitude] for primary
@@ -108,7 +109,7 @@ export function calculateDistanceKm(locA, locB) {
  * @param {number} [totalQty=90]
  * @returns {Array<object>}
  */
-export function getDemoBuyerDestinations(crop = 'tomato', totalQty = 90) {
+export function getDemoBuyerDestinations(crop = (CROP_KEYS[0] || 'rice'), totalQty = 90) {
   const q1 = Math.round(totalQty * 0.3)
   const q2 = Math.round(totalQty * 0.35)
   const q3 = Math.max(1, totalQty - q1 - q2)
@@ -147,7 +148,7 @@ export function getDemoBuyerDestinations(crop = 'tomato', totalQty = 90) {
  *
  * @param {object} params
  * @param {string} [params.hubLocation='Azadpur Mandi Hub, Delhi'] - Origin hub location
- * @param {string} [params.crop='tomato'] - Aggregated produce crop
+ * @param {string} [params.crop='rice'] - Aggregated produce crop
  * @param {Array<object>} params.buyers - List of buyer delivery destinations
  * @param {string} [params.lang='en'] - Language ('en' | 'hi')
  * @returns {{
@@ -175,11 +176,11 @@ export function getDemoBuyerDestinations(crop = 'tomato', totalQty = 90) {
  */
 export function optimizeDeliveryRoute({
   hubLocation = 'Azadpur Mandi Hub, Delhi',
-  crop = 'tomato',
+  crop = (CROP_KEYS[0] || 'rice'),
   buyers = [],
   lang = 'en',
 } = {}) {
-  const normCrop = crop ? crop.toLowerCase().trim() : 'tomato'
+  const normCrop = crop ? crop.toLowerCase().trim() : (CROP_KEYS[0] || 'rice')
   const validBuyers = Array.isArray(buyers)
     ? buyers.filter((b) => b && typeof b === 'object' && (b.location || b.buyerLocation))
     : []

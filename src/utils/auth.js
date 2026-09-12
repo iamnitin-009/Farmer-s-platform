@@ -14,6 +14,7 @@ const BUYER_ORDERS_KEY = 'sih_buyer_orders'
 
 import { normalizeOrder } from './paymentEscrow.js'
 import { ensureOrderTraceabilityId } from './traceability.js'
+import { calculateDeliveryPricing } from './deliveryPricing.js'
 
 // Demo-safe password hashing using native browser Web Crypto API (SHA-256)
 export async function hashPassword(password) {
@@ -257,6 +258,31 @@ export async function loginUser({ mobile, password }) {
     role: user.role || 'farmer',
     loginTime: new Date().toISOString(),
   }
+
+  // Request authoritative server session token
+  try {
+    const tokenResp = await fetch('/api/auth/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: user.id,
+        role: user.role || 'farmer',
+        name: user.name,
+        mobile: user.mobile,
+        passwordHash: user.passwordHash,
+        password,
+      }),
+    })
+    if (tokenResp.ok) {
+      const tokenData = await tokenResp.json()
+      if (tokenData.success && tokenData.token) {
+        session.token = tokenData.token
+      }
+    }
+  } catch (e) {
+    console.warn('[auth] Could not obtain server session token:', e)
+  }
+
   localStorage.setItem(USER_SESSION_KEY, JSON.stringify(session))
   // Keep legacy session synced
   localStorage.setItem(LEGACY_FARMER_SESSION_KEY, JSON.stringify(session))
@@ -335,7 +361,9 @@ export function placeOrder({ listing, quantity, buyerSession }) {
   try {
     const orderQty = parseFloat(quantity)
     const unitPrice = parseFloat(listing.price ?? listing.expectedPrice ?? 0)
-    const totalAmount = Math.round(orderQty * unitPrice * 100) / 100
+    const productSubtotal = Math.round(orderQty * unitPrice * 100) / 100
+    const dlv = calculateDeliveryPricing(productSubtotal, orderQty)
+    const totalAmount = dlv.netPayable
     const orderId = 'ORD_' + Date.now().toString().slice(-6)
 
     const newOrder = {
@@ -347,10 +375,20 @@ export function placeOrder({ listing, quantity, buyerSession }) {
       buyerLocation: buyerSession.location,
       listingId: listing.id,
       crop: listing.crop,
+      variety: listing.variety || 'Regular',
       quantity: orderQty,
       quantityKg: orderQty,
       pricePerKg: unitPrice,
       ratePerKg: unitPrice,
+      productSubtotal,
+      deliveryCharge: dlv.deliveryCharge,
+      platformFee: dlv.platformFee,
+      discount: dlv.discount,
+      netPayable: dlv.netPayable,
+      effectivePricePerKg: dlv.effectivePricePerKg,
+      deliveryStatus: dlv.deliveryStatus,
+      deliveryRuleVersion: dlv.deliveryRuleVersion,
+      calculatedAt: dlv.calculatedAt,
       totalAmount,
       farmerLocation: listing.location,
       farmerId: listing.farmerId || 'demo_farmer',

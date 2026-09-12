@@ -2,7 +2,6 @@ import { useState, useMemo, useEffect } from 'react'
 import { useLanguage } from '../context/LanguageContext.jsx'
 import {
   getUserOrders,
-  placeOrder,
   advanceOrderStatus,
 } from '../utils/auth.js'
 import {
@@ -13,7 +12,7 @@ import { getGradeBadgeStyle } from '../utils/quality.js'
 import { isEligibleForHubListing, getAggregatedCropTotal } from '../utils/aggregation.js'
 import { ensureListingTraceabilityId, generateQrDataUrl, getTraceabilityUrl } from '../utils/traceability.js'
 import { predictCropDemand, getDemandBadgeStyle } from '../utils/demandPrediction.js'
-import { fetchListings, updateListing as apiUpdateListing } from '../utils/listingService.js'
+import { fetchListings } from '../utils/listingService.js'
 import { CROP_KEYS, getCropVarieties } from '../utils/cropConstants.js'
 import { allocateMultiFarmerOrder } from '../utils/buyerMatching.js'
 import { calculateDeliveryPricing } from '../utils/deliveryPricing.js'
@@ -105,7 +104,7 @@ export default function BuyerMarketplacePage({ onNavigate, session }) {
     let isMounted = true
     fetchListings({ role: 'buyer' }, session)
       .then((serverItems) => {
-        if (isMounted && Array.isArray(serverItems) && serverItems.length > 0) {
+        if (isMounted && Array.isArray(serverItems)) {
           setListings(serverItems)
         }
       })
@@ -379,8 +378,8 @@ export default function BuyerMarketplacePage({ onNavigate, session }) {
     }
   }
 
-  // Submit Order
-  const handleConfirmOrder = (e) => {
+  // Submit Direct Listing Order
+  const handleConfirmOrder = async (e) => {
     e.preventDefault()
     setOrderError('')
 
@@ -390,37 +389,67 @@ export default function BuyerMarketplacePage({ onNavigate, session }) {
       return
     }
 
-    if (qty > orderingListing.quantity) {
-      setOrderError(mktT.validation.qtyExceeded.replace('{max}', orderingListing.quantity))
+    const available = Math.max(
+      0,
+      (orderingListing.quantity || 0) - (orderingListing.reservedQuantity || 0)
+    )
+    if (qty > available) {
+      setOrderError(mktT.validation.qtyExceeded.replace('{max}', available))
       return
     }
 
     setIsPlacingOrder(true)
 
-    const result = placeOrder({
-      listing: orderingListing,
-      quantity: qty,
-      buyerSession: session || { id: 'user_fallback', name: 'Verified User' },
-    })
+    try {
+      const headers = { 'Content-Type': 'application/json' }
+      if (session?.token) headers['Authorization'] = `Bearer ${session.token}`
+      if (session?.id) headers['x-user-id'] = session.id
+      if (session?.role) headers['x-user-role'] = session.role
+      if (session?.name) headers['x-user-name'] = session.name
+      if (session?.mobile) headers['x-user-mobile'] = session.mobile
 
-    setIsPlacingOrder(false)
-
-    if (result.success) {
-      const rem = Math.max(0, orderingListing.quantity - qty)
-      apiUpdateListing(orderingListing.id, { quantity: rem, action: 'order_decrement' }, session).catch(() => {})
-      fetch('/api/orders', {
+      const resp = await fetch('/api/orders', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(result.order),
-      }).catch(() => {})
-      setOrderSuccess(result.order)
+        headers,
+        body: JSON.stringify({
+          listingId: orderingListing.id,
+          quantity: qty,
+          crop: orderingListing.crop,
+          variety: orderingListing.variety,
+          pricePerKg: orderingListing.price,
+          buyerLocation: session?.location || '',
+        }),
+      })
+
+      const data = await resp.json()
+      if (!resp.ok || !data.success || !data.order) {
+        throw new Error(data.error || 'Failed to place order')
+      }
+
+      // Authoritative backend order received
+      const backendOrder = data.order
+
+      // Sync local cache for offline/instant UI update
+      try {
+        const raw = localStorage.getItem('sih_buyer_orders')
+        const existing = raw ? JSON.parse(raw) : []
+        const updatedOrders = [backendOrder, ...existing.filter((o) => o.id !== backendOrder.id && o.orderId !== backendOrder.id)]
+        localStorage.setItem('sih_buyer_orders', JSON.stringify(updatedOrders))
+      } catch (err) {
+        console.warn('Could not sync buyer orders to localStorage:', err)
+      }
+
+      setOrderSuccess(backendOrder)
       setOrderingListing(null)
+      await refreshListings()
+
       if (session?.id) {
         setBuyerOrders(getUserOrders(session.id, session.mobile))
       }
-      refreshListings()
-    } else {
-      setOrderError(result.error || 'Failed to place order')
+    } catch (err) {
+      setOrderError(err.message || 'Failed to place order')
+    } finally {
+      setIsPlacingOrder(false)
     }
   }
 

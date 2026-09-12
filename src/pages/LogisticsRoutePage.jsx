@@ -33,8 +33,8 @@ export default function LogisticsRoutePage({ _session, onNavigate }) {
     )
   }, [hubAggregations])
 
-  // Selected crop (defaults to first active crop, or 'tomato')
-  const defaultCrop = activeHubCrops.length > 0 ? activeHubCrops[0] : 'tomato'
+  // Selected crop (defaults to first active crop, or whitelisted CROP-001 crop)
+  const defaultCrop = activeHubCrops.length > 0 ? activeHubCrops[0] : (CROP_KEYS[0] || 'rice')
   const [selectedCrop, setSelectedCrop] = useState(defaultCrop)
 
   // Current hub lot

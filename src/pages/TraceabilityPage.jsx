@@ -22,9 +22,41 @@ export default function TraceabilityPage({ traceabilityId, onNavigate, session }
   const [searchInput, setSearchInput] = useState('')
   const [qrUrl, setQrUrl] = useState('')
   const [copied, setCopied] = useState(false)
+  const [serverJourney, setServerJourney] = useState(null)
+  const [, setIsLoadingServer] = useState(false)
 
-  // Derive public journey data safely
-  const journey = activeId ? buildTraceabilityData(activeId) : null
+  // Server-authoritative traceability lookup (works across different devices & browsers)
+  useEffect(() => {
+    if (!activeId) {
+      setServerJourney(null)
+      return
+    }
+    let isMounted = true
+    setIsLoadingServer(true)
+    fetch(`/api/traceability/${encodeURIComponent(activeId)}`)
+      .then((res) => {
+        if (!res.ok) throw new Error('Not found')
+        return res.json()
+      })
+      .then((data) => {
+        if (isMounted && data?.success && data?.traceability) {
+          setServerJourney(data.traceability)
+        }
+      })
+      .catch(() => {
+        if (isMounted) setServerJourney(null)
+      })
+      .finally(() => {
+        if (isMounted) setIsLoadingServer(false)
+      })
+    return () => {
+      isMounted = false
+    }
+  }, [activeId])
+
+  // Derive public journey data: Server is authoritative, fallback to local storage
+  const localJourney = activeId ? buildTraceabilityData(activeId) : null
+  const journey = serverJourney || localJourney
 
   // Generate QR code whenever activeId changes
   useEffect(() => {
