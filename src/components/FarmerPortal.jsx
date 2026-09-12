@@ -82,7 +82,14 @@ export default function FarmerPortal({ onNavigate, session, onLogout }) {
     if (!session?.id) return
     const local = getFarmerOrders(session.id, session.mobile) || []
     try {
-      const res = await fetch(`/api/orders?farmerId=${encodeURIComponent(session.id)}`)
+      const headers = { 'Content-Type': 'application/json' }
+      if (session?.token) headers['Authorization'] = `Bearer ${session.token}`
+      if (session?.id) headers['x-user-id'] = session.id
+      if (session?.role) headers['x-user-role'] = session.role
+      if (session?.name) headers['x-user-name'] = session.name
+      if (session?.mobile) headers['x-user-mobile'] = session.mobile
+
+      const res = await fetch(`/api/orders?farmerId=${encodeURIComponent(session.id)}`, { headers })
       if (res.ok) {
         const data = await res.json()
         const serverOrders = data.orders || (Array.isArray(data) ? data : [])
@@ -112,9 +119,14 @@ export default function FarmerPortal({ onNavigate, session, onLogout }) {
 
   const handleAcceptAllocation = async (allocationId) => {
     try {
+      const headers = { 'Content-Type': 'application/json' }
+      if (session?.token) headers['Authorization'] = `Bearer ${session.token}`
+      if (session?.id) headers['x-user-id'] = session.id
+      if (session?.role) headers['x-user-role'] = session.role
+
       const res = await fetch(`/api/allocations/${encodeURIComponent(allocationId)}/accept`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({ farmerId: session?.id }),
       })
       const result = await res.json()
@@ -137,9 +149,14 @@ export default function FarmerPortal({ onNavigate, session, onLogout }) {
       return
     }
     try {
+      const headers = { 'Content-Type': 'application/json' }
+      if (session?.token) headers['Authorization'] = `Bearer ${session.token}`
+      if (session?.id) headers['x-user-id'] = session.id
+      if (session?.role) headers['x-user-role'] = session.role
+
       const res = await fetch(`/api/allocations/${encodeURIComponent(allocationId)}/reject`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({ farmerId: session?.id, reason: 'Farmer declined' }),
       })
       const result = await res.json()
@@ -195,7 +212,7 @@ export default function FarmerPortal({ onNavigate, session, onLogout }) {
     setQrModalData({
       traceabilityId: tid,
       crop: itemOrOrder.crop,
-      title: portalT.crops[itemOrOrder.crop] || itemOrOrder.crop,
+      title: portalT?.crops?.[itemOrOrder.crop] || itemOrOrder.crop,
       url,
       qrDataUrl: dataUrl,
     })
@@ -675,7 +692,7 @@ export default function FarmerPortal({ onNavigate, session, onLogout }) {
             currentUserId: session?.id,
             lang,
           })
-          const cropName = portalT.crops[recentListing.crop] || recentListing.crop
+          const cropName = portalT?.crops?.[recentListing.crop] || recentListing.crop
 
           return (
             <div className="buyer-matches-section">
@@ -820,15 +837,16 @@ export default function FarmerPortal({ onNavigate, session, onLogout }) {
                         const newCrop = e.target.value
                         setCrop(newCrop)
                         const vars = getCropVarieties(newCrop)
-                        setVariety(vars[0] || 'Regular')
+                        const firstVar = typeof vars[0] === 'object' && vars[0] !== null ? vars[0].name : (vars[0] || 'Regular')
+                        setVariety(firstVar)
                         setPriceApplied(false)
                         if (errors.crop) setErrors((prev) => ({ ...prev, crop: undefined }))
                       }}
                     >
-                      <option value="">{portalT.cropPlaceholder}</option>
+                      <option value="">{portalT?.cropPlaceholder || '-- Choose a crop --'}</option>
                       {CROP_KEYS.map((key) => (
                         <option key={key} value={key}>
-                          {portalT.crops[key]}
+                          {portalT?.crops?.[key] || key}
                         </option>
                       ))}
                     </select>
@@ -839,7 +857,7 @@ export default function FarmerPortal({ onNavigate, session, onLogout }) {
                   {availableVarieties.length > 0 && (
                     <div className="form-group full-width">
                       <label htmlFor="varietySelect" className="form-label">
-                        {portalT.varietyLabel || (lang === 'hi' ? 'किस्म (Variety)' : 'Variety')} <span className="req">*</span>
+                        {portalT?.varietyLabel || (lang === 'hi' ? 'किस्म (Variety)' : 'Variety')} <span className="req">*</span>
                       </label>
                       <select
                         id="varietySelect"
@@ -850,11 +868,14 @@ export default function FarmerPortal({ onNavigate, session, onLogout }) {
                           setPriceApplied(false)
                         }}
                       >
-                        {availableVarieties.map((v) => (
-                          <option key={v} value={v}>
-                            {portalT.varieties?.[v] || v}
-                          </option>
-                        ))}
+                        {availableVarieties.map((v) => {
+                          const val = typeof v === 'object' && v !== null ? v.name : v
+                          return (
+                            <option key={val} value={val}>
+                              {portalT?.varieties?.[val] || (typeof v === 'object' && v !== null ? (lang === 'hi' ? v.nameHi || v.name : v.name) : val)}
+                            </option>
+                          )
+                        })}
                       </select>
                     </div>
                   )}
@@ -1368,7 +1389,7 @@ export default function FarmerPortal({ onNavigate, session, onLogout }) {
               /* Listings Grid */
               <div className="listings-grid">
                 {myListings.map((item) => {
-                  const cropDisplayName = portalT.crops[item.crop] || item.crop
+                  const cropDisplayName = portalT?.crops?.[item.crop] || item.crop
                   const totalEst = (item.quantity * item.price).toLocaleString('en-IN')
 
                   return (
@@ -1551,7 +1572,7 @@ export default function FarmerPortal({ onNavigate, session, onLogout }) {
             ) : (
               <div className="orders-list">
                 {farmerOrders.map((order) => {
-                  const cropName = portalT.crops[order.crop] || order.crop
+                  const cropName = portalT?.crops?.[order.crop] || order.crop
                   const orderDate = new Date(order.createdAt).toLocaleDateString()
 
                   return (
@@ -1729,7 +1750,7 @@ export default function FarmerPortal({ onNavigate, session, onLogout }) {
           currentUserId: session?.id,
           lang,
         })
-        const cropName = portalT.crops[activeMatchesListing.crop] || activeMatchesListing.crop
+        const cropName = portalT?.crops?.[activeMatchesListing.crop] || activeMatchesListing.crop
 
         return (
           <div className="modal-backdrop" onClick={() => setActiveMatchesListing(null)}>
@@ -1899,7 +1920,7 @@ export default function FarmerPortal({ onNavigate, session, onLogout }) {
                 <div className="detail-facts-grid" style={{ marginBottom: '16px' }}>
                   <div className="fact-item">
                     <span className="fact-label">{bmT.demandCrop || 'Crop Demanded'}</span>
-                    <span className="fact-val">{portalT.crops[match.crop] || match.crop}</span>
+                    <span className="fact-val">{portalT?.crops?.[match.crop] || match.crop}</span>
                   </div>
                   <div className="fact-item">
                     <span className="fact-label">{bmT.demandQuantity || 'Demand Volume'}</span>

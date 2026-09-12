@@ -175,6 +175,11 @@ export function getCropConfig(crop) {
 
 export function getCropVarieties(crop) {
   const norm = normalizeCropKey(crop);
+  return norm && CROP_VARIETIES[norm] ? [...CROP_VARIETIES[norm]] : [];
+}
+
+export function getCropVarietyObjects(crop) {
+  const norm = normalizeCropKey(crop);
   return norm && CROP_CONFIG[norm] ? [...CROP_CONFIG[norm].varieties] : [];
 }
 

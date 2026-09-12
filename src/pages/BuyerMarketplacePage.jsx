@@ -634,11 +634,14 @@ export default function BuyerMarketplacePage({ onNavigate, session }) {
                       onChange={(e) => setSelectedVariety(e.target.value)}
                     >
                       <option value="all">{lang === 'hi' ? 'सभी किस्में' : 'All Varieties'}</option>
-                      {getCropVarieties(selectedCrop).map((v) => (
-                        <option key={v} value={v}>
-                          {farmerPortalT.varieties?.[v] || v}
-                        </option>
-                      ))}
+                      {getCropVarieties(selectedCrop).map((v) => {
+                        const val = typeof v === 'object' && v !== null ? v.name : v
+                        return (
+                          <option key={val} value={val}>
+                            {farmerPortalT?.varieties?.[val] || val}
+                          </option>
+                        )
+                      })}
                     </select>
                   </div>
                 )}
@@ -1690,11 +1693,14 @@ export default function BuyerMarketplacePage({ onNavigate, session }) {
                     }}
                   >
                     <option value="Any">{lang === 'hi' ? 'कोई भी किस्म (Any)' : 'Any Variety'}</option>
-                    {getCropVarieties(multiCrop).map((v) => (
-                      <option key={v} value={v}>
-                        {farmerPortalT.varieties?.[v] || v}
-                      </option>
-                    ))}
+                    {getCropVarieties(multiCrop).map((v) => {
+                      const val = typeof v === 'object' && v !== null ? v.name : v
+                      return (
+                        <option key={val} value={val}>
+                          {farmerPortalT?.varieties?.[val] || val}
+                        </option>
+                      )
+                    })}
                   </select>
                 </div>
 

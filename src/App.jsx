@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import React, { Component, useState, useEffect } from 'react'
 import { LanguageProvider, useLanguage } from './context/LanguageContext.jsx'
 import Header from './components/Header.jsx'
 import Hero from './components/Hero.jsx'
@@ -15,6 +15,59 @@ import TraceabilityPage from './pages/TraceabilityPage.jsx'
 import VoiceAssistant from './components/VoiceAssistant.jsx'
 import Footer from './components/Footer.jsx'
 import { getCurrentUser, logoutUser } from './utils/auth.js'
+
+class ErrorBoundary extends Component {
+  constructor(props) {
+    super(props)
+    this.state = { hasError: false, error: null }
+  }
+
+  static getDerivedStateFromError(error) {
+    return { hasError: true, error }
+  }
+
+  componentDidCatch(error, errorInfo) {
+    console.error('App ErrorBoundary caught error:', error, errorInfo)
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div style={{ padding: '40px 20px', textAlign: 'center', maxWidth: '600px', margin: '40px auto', background: '#fff', borderRadius: '12px', boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }}>
+          <div style={{ fontSize: '3rem', marginBottom: '16px' }}>🌾</div>
+          <h2 style={{ color: '#166534', marginBottom: '10px' }}>Something went wrong</h2>
+          <p style={{ color: '#64748b', marginBottom: '24px', fontSize: '0.95rem' }}>
+            {this.state.error?.message || 'An unexpected error occurred while rendering the page.'}
+          </p>
+          <div style={{ display: 'flex', gap: '12px', justifyContent: 'center' }}>
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={() => {
+                this.setState({ hasError: false, error: null })
+                window.location.reload()
+              }}
+            >
+              ↻ Reload Page
+            </button>
+            <button
+              type="button"
+              className="btn btn-outline"
+              onClick={() => {
+                this.setState({ hasError: false, error: null })
+                if (this.props.onNavigate) this.props.onNavigate('/dashboard')
+                else window.location.href = '/dashboard'
+              }}
+            >
+              Go to Dashboard
+            </button>
+          </div>
+        </div>
+      )
+    }
+    return this.props.children
+  }
+}
 
 // App.jsx coordinates top-level routing between '/', '/auth', '/dashboard', '/farmer', '/buyer', '/admin', and '/traceability'
 // wrapped in LanguageProvider so language state is shared globally.
@@ -120,6 +173,7 @@ function MainApp({ currentPath, onNavigate }) {
       />
 
       <main>
+        <ErrorBoundary onNavigate={onNavigate}>
         {isTraceability ? (
           <TraceabilityPage
             traceabilityId={traceabilityId}
@@ -213,6 +267,7 @@ function MainApp({ currentPath, onNavigate }) {
             <PlatformFeatures session={session} onNavigate={onNavigate} />
           </>
         )}
+        </ErrorBoundary>
       </main>
 
       <Footer />
